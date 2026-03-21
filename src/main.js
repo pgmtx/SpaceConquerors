@@ -6,7 +6,7 @@ import {
   updateTeamHUD, updateLeaderboard, showShipInfo, showPlanetInfo,
   closeInfoPanel, initMinimap, drawMinimap, executePendingAction,
 } from './ui.js'
-import { getTeamIdFromToken, getMap, getAllTeams, getShips } from './api.js'
+import { getTeamIdFromToken, getMap, getAllTeams, getShips, getModules } from './api.js'
 import { preloadAllModels } from './models.js'
 import { state } from './state.js'
 
@@ -86,16 +86,18 @@ async function refreshMap() {
 
 async function refreshAllTeams() {
   try {
-    const [teams, myShips] = await Promise.all([
+    const [teams, myShips, myModules] = await Promise.all([
       getAllTeams(),
       getShips(state.teamId),
+      getModules(state.teamId),
     ])
     state.allTeams = teams || []
     state.myTeam = state.allTeams.find(t => t.idEquipe === state.teamId) || null
-    // Merge position data from /vaisseaux endpoint (absent dans /equipes)
-    // et forcer proprietaire pour que les boutons d'action s'affichent
-    if (state.myTeam && myShips) {
-      state.myTeam.vaisseaux = myShips.map(s => ({ ...s, proprietaire: state.teamId }))
+    if (state.myTeam) {
+      // positionX/Y absents de /equipes, forcer proprietaire pour les boutons
+      if (myShips) state.myTeam.vaisseaux = myShips.map(s => ({ ...s, proprietaire: state.teamId }))
+      // modules avec idPlanete null = disponibles à poser
+      if (myModules) state.myTeam.modules = myModules
     }
     updateTeamHUD(state.myTeam)
     updateLeaderboard(state.allTeams)

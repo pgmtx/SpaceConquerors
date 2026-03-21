@@ -75,6 +75,19 @@ export function getModules(teamId) {
   return apiFetch(`/equipes/${teamId}/modules`)
 }
 
+export function placeModule(teamId, moduleId, planeteId) {
+  return apiFetch(`/equipes/${teamId}/module/${moduleId}/poser`, {
+    method: 'PUT',
+    body: JSON.stringify({ idModule: moduleId, idPlanete: planeteId }),
+  })
+}
+
+export function removeModule(teamId, moduleId) {
+  return apiFetch(`/equipes/${teamId}/module/${moduleId}/supprimer`, {
+    method: 'DELETE',
+  })
+}
+
 // Marketplace
 export function getMarketOffers() {
   return apiFetch('/market/offres')

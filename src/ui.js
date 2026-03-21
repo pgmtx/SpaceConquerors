@@ -1,6 +1,6 @@
 import { state } from './state.js'
 import { getTeamColor } from './mapRenderer.js'
-import { doAction } from './api.js'
+import { doAction, placeModule, removeModule } from './api.js'
 
 // ── Notifications ─────────────────────────────────────────────
 export function notify(msg, type = 'info') {
@@ -181,8 +181,63 @@ export function showPlanetInfo(planete) {
     <div class="info-row"><span class="info-label">Slots</span><span class="info-value">${slots}</span></div>
     <div class="info-row"><span class="info-label">Modules</span><span class="info-value">${mods}</span></div>
   `
-  document.getElementById('actions-panel').classList.remove('visible')
+  // Modules panel (planètes qu'on possède)
+  const actionsPanel = document.getElementById('actions-panel')
+  const actionsButtons = document.getElementById('actions-buttons')
+  const isOurs = planete.proprietaire?.idEquipe === state.teamId || planete.proprietaire === state.teamId
+  if (isOurs) {
+    actionsPanel.classList.add('visible')
+    actionsButtons.innerHTML = ''
+    document.getElementById('actions-title').textContent = '◈ MODULES'
+    renderModulesPanel(actionsButtons, planete)
+  } else {
+    actionsPanel.classList.remove('visible')
+  }
   openInfoPanel()
+}
+
+function renderModulesPanel(container, planete) {
+  // Modules déjà posés sur cette planète
+  const placed = planete.modules || []
+  placed.forEach(mod => {
+    const type = mod.paramModule?.typeModule || mod.paramModule?.id || '?'
+    const btn = document.createElement('button')
+    btn.className = 'action-btn cooldown'
+    btn.textContent = `✕ ${type}`
+    btn.title = 'Retirer ce module'
+    btn.addEventListener('click', async () => {
+      btn.disabled = true
+      try {
+        await removeModule(state.teamId, mod.id)
+        notify(`Module ${type} retiré`, 'success')
+      } catch (e) { notify(e.message, 'error') }
+      btn.disabled = false
+    })
+    container.appendChild(btn)
+  })
+
+  // Modules disponibles (non posés)
+  const available = (state.myTeam?.modules || []).filter(m => !m.idPlanete)
+  if (available.length === 0 && placed.length === 0) {
+    container.innerHTML = '<span style="color:#557799;font-size:11px">Aucun module disponible</span>'
+    return
+  }
+  available.forEach(mod => {
+    const type = mod.paramModule?.typeModule || mod.paramModule?.id || '?'
+    const btn = document.createElement('button')
+    btn.className = 'action-btn'
+    btn.textContent = `+ ${type}`
+    btn.title = 'Poser ce module sur la planète'
+    btn.addEventListener('click', async () => {
+      btn.disabled = true
+      try {
+        await placeModule(state.teamId, mod.id, planete.idPlanete)
+        notify(`Module ${type} posé !`, 'success')
+      } catch (e) { notify(e.message, 'error') }
+      btn.disabled = false
+    })
+    container.appendChild(btn)
+  })
 }
 
 function isShipAvailable(vaisseau) {
