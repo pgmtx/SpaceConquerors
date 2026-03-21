@@ -29,11 +29,15 @@ const claimedTargets = new Map(); // key → shipId
 
 // ── Cache vaisseaux ennemis ────────────────────────────────────
 // Clé "x_y" → { x, y, teamId, lastSeen }
-// Alimenté à chaque scan de carte, entrées périmées supprimées après 30s
+// Alimenté à chaque scan de carte, entrées périmées supprimées après 10s
 const enemyCache = new Map();
-const ENEMY_STALE_MS = 30_000;
-const ENEMY_RISK_RADIUS = 3;   // Cases autour d'une cible → pénalité de risque
-const ENEMY_RISK_PENALTY = 200; // Ajouté au score de cible si ennemi proche
+const ENEMY_STALE_MS = 10_000;      // réduit de 30s → 10s pour positions fraîches
+const ENEMY_RISK_RADIUS = 3;        // Cases autour d'une cible → pénalité de risque
+const ENEMY_RISK_PENALTY = 200;     // Ajouté au score de cible si ennemi proche
+
+// ── Cases réservées par les vaisseaux alliés ce tick ─────────
+// Empêche deux alliés de viser la même case intermédiaire
+const reservedCells = new Set();
 
 // ── État par vaisseau ─────────────────────────────────────────
 // shipId → { phase, target, lastAttackTime, hpBeforeAttack }
@@ -50,13 +54,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Parse le temps restant depuis un message d'erreur de cooldown (en secondes)
 // Ex: "Cooldown: 12.5s" ou "action disponible dans 8 secondes" etc.
 function parseCooldownMs(msg) {
-    const m = msg.match(/(\d+(?:[.,]\d+)?)\s*s/i);
-    if (m) return Math.ceil(parseFloat(m[1].replace(',', '.'))) * 1000 + 1000;
+    // Format "HH:MM:SS"
+    const timeMatch = msg.match(/(\d{2}):(\d{2}):(\d{2})/);
+    if (timeMatch) {
+        const now = new Date();
+        const target = new Date();
+        target.setHours(+timeMatch[1], +timeMatch[2], +timeMatch[3], 0);
+        if (target <= now) target.setDate(target.getDate() + 1);
+        return Math.max(500, target - now) + 500;
+    }
+    // Format "12.5s"
+    const secMatch = msg.match(/(\d+(?:[.,]\d+)?)\s*s/i);
+    if (secMatch) return Math.ceil(parseFloat(secMatch[1].replace(',', '.'))) * 1000 + 1000;
     return null;
 }
 
 function isCooldownError(msg) {
     return /cooldown|disponible|attendre|wait|trop t.t|prochaine/i.test(msg);
+}
+
+function isCellOccupiedError(msg) {
+    return /occup/i.test(msg);
 }
 
 // Effectue une action ; si l'API répond "cooldown", attend le délai indiqué + 1s puis relance une fois.
@@ -84,8 +102,8 @@ function isAdjacent(x1, y1, x2, y2) {
 }
 
 // BFS : premier pas du chemin le plus court vers une case adjacente à (tx,ty)
-// Évite planètes et vaisseaux ennemis (obstacles infranchissables)
-function findNextStep(sx, sy, tx, ty, avoidEnemies = true) {
+// Évite planètes, vaisseaux ennemis et cases réservées par alliés
+function findNextStep(sx, sy, tx, ty, avoidEnemies = true, avoidReserved = true) {
     if (isAdjacent(sx, sy, tx, ty)) return null;
 
     const startKey = `${sx}_${sy}`;
@@ -104,8 +122,10 @@ function findNextStep(sx, sy, tx, ty, avoidEnemies = true) {
                 if (parent.has(nkey)) continue;
                 // Planètes = obstacles sauf la cible elle-même
                 if (planetCache.has(nkey) && !(nx === tx && ny === ty)) continue;
-                // Vaisseaux ennemis = obstacles (évitement)
+                // Vaisseaux ennemis = obstacles
                 if (avoidEnemies && enemyCache.has(nkey)) continue;
+                // Cases réservées par alliés ce tick = obstacles
+                if (avoidReserved && reservedCells.has(nkey)) continue;
 
                 parent.set(nkey, `${x}_${y}`);
 
@@ -120,8 +140,10 @@ function findNextStep(sx, sy, tx, ty, avoidEnemies = true) {
             }
         }
     }
-    // Si aucun chemin sans ennemis, réessayer sans évitement
-    if (avoidEnemies) return findNextStep(sx, sy, tx, ty, false);
+    // Fallback 1 : ignorer les ennemis (cas de bloquer complet par ennemis)
+    if (avoidEnemies) return findNextStep(sx, sy, tx, ty, false, avoidReserved);
+    // Fallback 2 : ignorer les réservations alliées aussi
+    if (avoidReserved) return findNextStep(sx, sy, tx, ty, false, false);
     return null;
 }
 
@@ -153,6 +175,9 @@ function updateCache(cells) {
             if (ownerId && ownerId !== state.teamId) {
                 const ekey = `${cell.coord_x}_${cell.coord_y}`;
                 enemyCache.set(ekey, { x: cell.coord_x, y: cell.coord_y, teamId: ownerId, lastSeen: now });
+            } else if (ownerId === state.teamId) {
+                // Supprimer un ennemi potentiellement obsolète sur cette case
+                enemyCache.delete(`${cell.coord_x}_${cell.coord_y}`);
             }
         }
 
@@ -163,8 +188,8 @@ function updateCache(cells) {
 
         const key = `${cell.coord_x}_${cell.coord_y}`;
         const hp = cell.planete.pointDeVie ?? 0;
-        const rawOwner = cell.planete.proprietaire ?? cell.proprietaire ?? null;
-        const ownerId = extractOwnerId(rawOwner);
+        // Selon la spec, le propriétaire est sur la Case, pas sur la Planète
+        const ownerId = extractOwnerId(cell.proprietaire);
         const existing = planetCache.get(key);
         if (existing) {
             existing.hp = hp;
@@ -345,12 +370,39 @@ async function tickShip(ship) {
                 abandonTarget(id, ss, true);
                 return;
             }
+
+            const stepKey = `${step.x}_${step.y}`;
+
+            // Rescanner la case cible pour avoir une info fraîche sur les occupants
+            await scanArea(step.x, step.y, step.x, step.y);
+
+            // Vérifier si la case est occupée (ennemi connu ou réservée par un allié)
+            const blockedByEnemy = enemyCache.has(stepKey);
+            const blockedByAlly  = reservedCells.has(stepKey);
+            if (blockedByEnemy || blockedByAlly) {
+                log(ship.nom, `Case (${step.x},${step.y}) occupée (ennemi=${blockedByEnemy}, allié=${blockedByAlly}), replanification`);
+                // On ne fait rien ce tick ; au prochain tick le BFS contournera
+                return;
+            }
+
+            // Réserver la case avant d'envoyer la requête
+            reservedCells.add(stepKey);
+
             log(ship.nom, `MOVE : (${sx},${sy}) → (${step.x},${step.y}) [cible (${ss.target.x},${ss.target.y})]`);
             try {
                 await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", step.x, step.y);
                 log(ship.nom, `✓ Déplacement vers (${step.x},${step.y})`);
             } catch (e) {
-                log(ship.nom, `✗ Erreur déplacement : ${e.message}`);
+                // Libérer la réservation en cas d'échec
+                reservedCells.delete(stepKey);
+                if (isCellOccupiedError(e.message)) {
+                    // Obstacle temporaire (allié ou ennemi bougé entre-temps)
+                    // Mettre à jour l'enemyCache pour que le BFS replanifie correctement
+                    enemyCache.set(stepKey, { x: step.x, y: step.y, teamId: "unknown", lastSeen: Date.now() });
+                    log(ship.nom, `Case bloquée, replanification au prochain tick`);
+                } else {
+                    log(ship.nom, `✗ Erreur déplacement : ${e.message}`);
+                }
             }
             break;
         }
@@ -398,15 +450,16 @@ async function tickShip(ship) {
 
         case Phase.WAIT_CONQUER: {
             if (!ss.target) { ss.phase = Phase.SEARCH; return; }
-            if (!ss.lastAttackTime) { ss.phase = Phase.CONQUER; return; }
-            const elapsed = Date.now() - ss.lastAttackTime;
-            const conquerDelay = 3 * 60_000;
-            if (elapsed >= conquerDelay) {
-                ss.phase = Phase.CONQUER;
-            } else {
-                const rem = Math.ceil((conquerDelay - elapsed) / 1000);
-                log(ship.nom, `⏳ Conquête dans ${Math.floor(rem / 60)}m${rem % 60}s`);
+            // Utiliser dateProchaineAction du vaisseau (fourni par l'API)
+            if (ship.dateProchaineAction) {
+                const ready = new Date(ship.dateProchaineAction) <= new Date();
+                if (!ready) {
+                    const rem = Math.ceil((new Date(ship.dateProchaineAction) - Date.now()) / 1000);
+                    log(ship.nom, `⏳ Conquête dans ${Math.floor(rem / 60)}m${rem % 60}s`);
+                    return;
+                }
             }
+            ss.phase = Phase.CONQUER;
             break;
         }
 
@@ -419,15 +472,22 @@ async function tickShip(ship) {
             log(ship.nom, `★ Conquête de (${ss.target.x},${ss.target.y})`);
             try {
                 await doActionWithCooldown(state.teamId, id, "CONQUERIR", ss.target.x, ss.target.y);
-                log(ship.nom, `✓ Planète conquise !`);
-                notify(`[Bot] ${ship.nom} a conquis une planète !`, "success");
-                const cached = planetCache.get(ss.target.key);
-                if (cached) cached.ownerId = state.teamId;
-                abandonTarget(id, ss);
             } catch (e) {
-                log(ship.nom, `✗ Erreur conquête : ${e.message}`);
+                log(ship.nom, `Erreur conquête (${e.message}), vérification via rescan...`);
+            }
+            // Dans tous les cas, rescanner pour voir si la case nous appartient maintenant
+            await sleep(500);
+            await scanArea(ss.target.x - 1, ss.target.y - 1, ss.target.x + 1, ss.target.y + 1);
+            const cached = planetCache.get(ss.target.key);
+            if (cached?.ownerId === state.teamId) {
+                log(ship.nom, `✓ Planète conquise confirmée !`);
+                notify(`[Bot] ${ship.nom} a conquis une planète !`, "success");
+                abandonTarget(id, ss);
+            } else {
+                // Pas encore conquise, retenter l'attaque
+                log(ship.nom, `✗ Conquête échouée (proprio=${cached?.ownerId ?? "null"}), retour en ATTACK`);
                 ss.phase = Phase.ATTACK;
-                ss.lastAttackTime = Date.now();
+                ss.hpBeforeAttack = null;
             }
             break;
         }
@@ -443,6 +503,8 @@ let botInterval = null;
 async function botTick() {
     if (!botActive || tickRunning) return;
     tickRunning = true;
+    // Vider les réservations du tick précédent
+    reservedCells.clear();
     try {
         const ships = await getShips(state.teamId);
         if (!ships?.length) {
@@ -456,6 +518,7 @@ async function botTick() {
 
         for (const ship of activeShips) {
             await tickShip(ship);
+            await sleep(500);
         }
     } catch (e) {
         log("BOT", `Erreur tick : ${e.message}`);
@@ -484,6 +547,7 @@ export function stopBot() {
     claimedTargets.clear();
     shipState.clear();
     skippedPlanets.clear();
+    reservedCells.clear();
     log("BOT", "Arrêté");
     notify("[Bot] Arrêté", "info");
 }
