@@ -1,5 +1,14 @@
 {
+  "scripts": {
+    "dev": "vite --port 4200",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "bun server.js"
+  },
   "dependencies": {
     "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
   }
 }
