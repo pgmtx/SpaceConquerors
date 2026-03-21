@@ -5,6 +5,7 @@ import {
   setLoading, hideLoading, notify, updateCoords,
   updateTeamHUD, updateLeaderboard, showShipInfo, showPlanetInfo,
   closeInfoPanel, initMinimap, drawMinimap, executePendingAction,
+  refreshSelectedPlanet,
 } from './ui.js'
 import { getTeamIdFromToken, getMap, getAllTeams, getShips, getModules } from './api.js'
 import { preloadAllModels } from './models.js'
@@ -78,6 +79,7 @@ async function refreshMap() {
     await renderMap(state.mapCells)
     updateCoords(viewX, viewY)
     drawMinimap(state.mapCells, state.allTeams)
+    refreshSelectedPlanet(state.mapCells)
   } catch (e) {
     console.error('Map error:', e)
     notify('Erreur carte: ' + e.message, 'error')
@@ -205,7 +207,17 @@ function registerInput() {
       else if (hit.type === 'planet') { cx = hit.data?.coord_x; cy = hit.data?.coord_y }
       else if (hit.type === 'ship') { cx = hit.data?.positionX; cy = hit.data?.positionY }
       if (cx !== undefined) {
+        const action = state.pendingAction?.action
         await executePendingAction(cx, cy)
+        // Refresh map après l'action pour voir les HP à jour
+        await refreshMap()
+        // Si c'était une attaque sur une planète, ré-afficher son panneau avec les HP à jour
+        if (action === 'ATTAQUER' && hit.type === 'planet') {
+          const updatedCell = state.mapCells.find(
+            c => c.coord_x === cx && c.coord_y === cy && c.planete
+          )
+          if (updatedCell?.planete) showPlanetInfo(updatedCell.planete)
+        }
         return
       }
     }

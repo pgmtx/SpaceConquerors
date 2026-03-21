@@ -159,8 +159,17 @@ export function showShipInfo(vaisseau) {
   openInfoPanel()
 }
 
+let _lastPlanete = null
+
+export function refreshSelectedPlanet(mapCells) {
+  if (!_lastPlanete) return
+  const cell = mapCells.find(c => c.planete?.idPlanete === _lastPlanete.idPlanete)
+  if (cell?.planete) showPlanetInfo(cell.planete)
+}
+
 export function showPlanetInfo(planete) {
   if (!planete) return closeInfoPanel()
+  _lastPlanete = planete
 
   const biome = planete.modelePlanete?.biome || '--'
   const type = planete.modelePlanete?.typePlanete || '--'
@@ -168,13 +177,14 @@ export function showPlanetInfo(planete) {
   const minerai = planete.mineraiDisponible ?? '?'
   const slots = planete.slotsConstruction ?? '?'
   const mods = (planete.modules || []).length
+  const hpColor = typeof hp === 'number' && hp < 30 ? 'bad' : 'good'
 
   document.getElementById('info-title').textContent = `🌍 ${planete.nom}`
 
   document.getElementById('info-col-1').innerHTML = `
     <div class="info-row"><span class="info-label">Type</span><span class="info-value">${type}</span></div>
     <div class="info-row"><span class="info-label">Biome</span><span class="info-value">${biome}</span></div>
-    <div class="info-row"><span class="info-label">HP</span><span class="info-value">${hp}</span></div>
+    <div class="info-row"><span class="info-label">HP</span><span class="info-value ${hpColor}">${hp}</span></div>
   `
   document.getElementById('info-col-2').innerHTML = `
     <div class="info-row"><span class="info-label">Minerai</span><span class="info-value">${fmt(minerai)}</span></div>
