@@ -133,6 +133,27 @@ function updateMinimapData(cells) {
 
 // ── Input ─────────────────────────────────────────────────────
 const keys = {}
+let shipSelectIndex = 0
+
+function selectShipByIndex(index) {
+  const ships = state.myTeam?.vaisseaux
+  if (!ships || ships.length === 0) { notify('Aucun vaisseau disponible', 'error'); return }
+  shipSelectIndex = ((index % ships.length) + ships.length) % ships.length
+  const vaisseau = ships[shipSelectIndex]
+  state.selectedShip = vaisseau
+  state.selectedPlanet = null
+  showShipInfo(vaisseau)
+  if (vaisseau.idVaisseau) highlightShip(vaisseau.idVaisseau, true)
+  if (vaisseau.positionX !== undefined) {
+    const newX = Math.max(0, Math.min(58 - state.viewSize, vaisseau.positionX - Math.floor(state.viewSize / 2)))
+    const newY = Math.max(0, Math.min(58 - state.viewSize, vaisseau.positionY - Math.floor(state.viewSize / 2)))
+    state.viewX = newX
+    state.viewY = newY
+    panCameraTo(newX, newY)
+    scheduleMapRefresh()
+  }
+  notify(`Vaisseau ${shipSelectIndex + 1}/${ships.length} : ${vaisseau.nom}`, 'info')
+}
 
 function registerInput() {
   window.addEventListener('keydown', e => {
@@ -140,6 +161,10 @@ function registerInput() {
     if (e.key === 'Escape') {
       closeInfoPanel()
       state.pendingAction = null
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      selectShipByIndex(e.shiftKey ? shipSelectIndex - 1 : shipSelectIndex + 1)
     }
   })
   window.addEventListener('keyup', e => { keys[e.key] = false })
