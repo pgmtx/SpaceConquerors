@@ -57,6 +57,22 @@
       background: rgba(0,100,160,0.9); box-shadow: 0 0 8px rgba(0,255,204,0.3);
     }
     #refresh-btn:disabled { opacity: 0.5; cursor: wait; }
+    #bot-btn {
+      font-family: 'Courier New', monospace;
+      font-size: 12px; letter-spacing: 1px;
+      padding: 5px 14px;
+      background: rgba(40,0,80,0.7); border: 1px solid rgba(150,0,255,0.6);
+      color: #cc88ff; border-radius: 4px; cursor: pointer;
+      transition: all 0.15s; pointer-events: all;
+    }
+    #bot-btn:hover:not(:disabled) {
+      background: rgba(80,0,160,0.9); box-shadow: 0 0 8px rgba(180,0,255,0.4);
+    }
+    #bot-btn.active {
+      background: rgba(60,0,120,0.9); border-color: rgba(200,100,255,0.9);
+      color: #ff88ff; box-shadow: 0 0 12px rgba(200,0,255,0.5);
+    }
+    #bot-btn:disabled { opacity: 0.5; cursor: wait; }
 
     /* ── MINIMAP ───────────────────────────────── */
     #minimap-container {
@@ -231,6 +247,7 @@
     </div>
     <div id="coords-display">[ X:0 Y:0 ]</div>
     <button id="refresh-btn">⟳ Rafraîchir</button>
+    <button id="bot-btn">⚡ Bot OFF</button>
     <div id="resources">
       <div class="resource-chip"><span class="icon">⛏</span><span id="res-minerai">0</span></div>
       <div class="resource-chip"><span class="icon">💰</span><span id="res-credits">0</span></div>

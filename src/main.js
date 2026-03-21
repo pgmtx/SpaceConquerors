@@ -40,6 +40,7 @@ import {
 } from "./api.js";
 import { preloadAllModels } from "./models.js";
 import { state } from "./state.js";
+import { startBot, stopBot, isBotActive } from "./bot.js";
 
 // ── Bootstrap ─────────────────────────────────────────────────
 async function main() {
@@ -84,6 +85,7 @@ async function main() {
 	startGameLoop();
 	registerInput();
 	registerRefreshButton();
+	registerBotButton();
 }
 
 // ── Game loop ─────────────────────────────────────────────────
@@ -360,6 +362,26 @@ function scheduleMapRefresh() {
 		clearMap();
 		await refreshMap();
 	}, 250);
+}
+
+// ── Bot toggle ────────────────────────────────────────────────
+function registerBotButton() {
+	const btn = document.getElementById("bot-btn");
+	if (!btn) return;
+	btn.addEventListener("click", async () => {
+		if (isBotActive()) {
+			stopBot();
+			btn.textContent = "⚡ Bot OFF";
+			btn.classList.remove("active");
+		} else {
+			btn.disabled = true;
+			btn.textContent = "⚡ Scan...";
+			await startBot();
+			btn.disabled = false;
+			btn.textContent = "⚡ Bot ON";
+			btn.classList.add("active");
+		}
+	});
 }
 
 main().catch(console.error);
