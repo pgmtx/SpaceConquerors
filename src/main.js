@@ -1,330 +1,487 @@
-import * as THREE from 'three'
-import { initScene, camera, render, panCameraTo, focusOnShip } from './scene.js'
-import { renderMap, animateMap, getClickedObject, highlightShip, clearMap } from './mapRenderer.js'
+import * as THREE from "three";
 import {
-  setLoading, hideLoading, notify, updateCoords,
-  updateHUD, updateLeaderboard, showShipInfo, showPlanetInfo,
-  closeInfoPanel, initMinimap, drawMinimap, executePendingAction,
-  refreshSelectedPlanet, openMarket,
+  getAllTeams,
+  getGameParams,
+  getMap,
+  getModules,
+  getPlans,
+  getShips,
+  getTeamIdFromToken
+} from "./api.js";
+import { animateMap, getClickedObject, highlightShip, renderMap } from "./mapRenderer.js";
+import { preloadAllModels } from "./models.js";
+import { camera, focusOnShip, focusOnWholeMap, initScene, panCameraTo, render } from "./scene.js";
+import { state } from "./state.js";
+import {
   clearPendingAction,
-} from './ui.js'
-import { getTeamIdFromToken, getMap, getAllTeams, getShips, getModules } from './api.js'
-import { preloadAllModels } from './models.js'
-import { state } from './state.js'
+  closeInfoPanel,
+  drawMinimap,
+  executePendingAction,
+  hideLoading,
+  initMinimap,
+  notify,
+  openMarket,
+  refreshSelectedPlanet,
+  setLoading,
+  showPlanetInfo,
+  showShipInfo,
+  updateCoords,
+  updateHUD,
+  updateLeaderboard
+} from "./ui.js";
 
-// ── Bootstrap ──────────────────────────────────────────────────
+let teamSelectIndex = 0;
+const keys = {};
+const moveAccumulator = { x: 0, y: 0 };
+
 async function main() {
-  setLoading(5, 'CONNEXION AU SERVEUR...')
+  setLoading(5, "Récupération du token de jeu...");
 
-  // Fetch token from proxy server to decode team_id
-  const tokenRes = await fetch('/token').then(r => r.json()).catch(() => null)
-  const token = tokenRes?.access_token || ''
+  const tokenPayload = await fetch("/token").then((response) => response.json()).catch(() => null);
+  const token = tokenPayload?.access_token || "";
+
   if (!token) {
-    setLoading(0, 'ERREUR: impossible de récupérer le token depuis le serveur')
-    return
+    setLoading(100, "Impossible de récupérer le token côté backend");
+    return;
   }
-  state.token = token
-  state.teamId = getTeamIdFromToken(token)
 
-  setLoading(15, 'CHARGEMENT DES MODÈLES 3D...')
+  state.token = token;
+  state.teamId = getTeamIdFromToken(token);
 
-  // Init Three.js scene in the canvas container
-  const container = document.getElementById('canvas-container')
-  initScene(container)
+  if (!state.teamId) {
+    setLoading(100, "Le token est invalide ou ne contient pas team_id");
+    return;
+  }
 
-  // Pre-load 3D models
+  setLoading(14, "Initialisation du cockpit 3D...");
+
+  initScene(document.getElementById("canvas-container"));
+  initMinimap();
+
   await preloadAllModels((loaded, total) => {
-    setLoading(15 + (loaded / total) * 40, `MODÈLES 3D: ${loaded}/${total}`)
-  })
+    setLoading(14 + (loaded / total) * 34, `Chargement des assets 3D ${loaded}/${total}`);
+  });
 
-  setLoading(60, 'RÉCUPÉRATION DE LA CARTE...')
+  state.actions = {
+    refreshMap,
+    refreshAll: refreshAllTeams,
+    fullSync: fullSync
+  };
 
-  // Init minimap canvas
-  initMinimap()
+  setLoading(56, "Synchronisation avec l'API...");
+  await fullSync();
+  initializeMapView();
 
-  // Initial data load
-  await Promise.allSettled([refreshMap(), refreshAllTeams()])
+  setLoading(96, "Prêt au décollage");
+  await new Promise((resolve) => setTimeout(resolve, 260));
+  hideLoading();
 
-  setLoading(95, 'PRÊT')
-  await new Promise(r => setTimeout(r, 350))
-  hideLoading()
-
-  // Start render loop, input, and UI wiring
-  startGameLoop()
-  registerInput()
-  registerButtons()
+  registerButtons();
+  registerInput();
+  startGameLoop();
+  scheduleAutoSync();
 }
 
-// ── Game loop ──────────────────────────────────────────────────
-function startGameLoop() {
-  let lastTime = 0
-  function loop(time) {
-    const delta = (time - lastTime) / 1000
-    lastTime = time
-    handleKeyMovement(delta)
-    animateMap(delta)
-    render(delta)
-    requestAnimationFrame(loop)
-  }
-  requestAnimationFrame(loop)
+async function fullSync() {
+  await Promise.allSettled([refreshMap(), refreshAllTeams()]);
 }
 
-// ── Data fetchers ──────────────────────────────────────────────
 async function refreshMap() {
-  const { viewX, viewY, viewSize } = state
   try {
-    const cells = await getMap(viewX, viewX + viewSize - 1, viewY, viewY + viewSize - 1)
-    state.mapCells = cells || []
-    updateMinimapData(state.mapCells)
-    await renderMap(state.mapCells)
-    updateCoords(viewX, viewY)
-    drawMinimap(state.mapCells, state.allTeams)
-    refreshSelectedPlanet(state.mapCells)
-  } catch (e) {
-    console.error('Map error:', e)
-    notify('Erreur carte: ' + e.message, 'error')
+    const cells = state.fullMapMode
+      ? await fetchWholeMap()
+      : await getMap(
+          state.viewX,
+          state.viewX + state.viewSize - 1,
+          state.viewY,
+          state.viewY + state.viewSize - 1
+        );
+
+    state.mapCells = cells || [];
+    updateMinimapData(state.mapCells);
+    await renderMap(state.mapCells);
+    updateCoords(
+      state.fullMapMode ? "GLOBAL" : state.viewX,
+      state.fullMapMode ? "58x58" : state.viewY
+    );
+    drawMinimap(state.mapCells);
+    refreshSelectedPlanet(state.mapCells);
+  } catch (error) {
+    notify(`Erreur carte: ${error.message}`, "error");
   }
+}
+
+async function fetchWholeMap() {
+  const chunkSize = 18;
+  const ranges = [];
+
+  for (let start = 0; start < state.mapWorldSize; start += chunkSize) {
+    ranges.push([start, Math.min(state.mapWorldSize - 1, start + chunkSize - 1)]);
+  }
+
+  const chunks = await Promise.all(
+    ranges.flatMap(([xStart, xEnd]) =>
+      ranges.map(([yStart, yEnd]) => getMap(xStart, xEnd, yStart, yEnd))
+    )
+  );
+
+  const merged = new Map();
+  chunks.flat().forEach((cell) => {
+    merged.set(`${cell.coord_x}_${cell.coord_y}`, cell);
+  });
+
+  return [...merged.values()].sort((left, right) =>
+    left.coord_y === right.coord_y
+      ? left.coord_x - right.coord_x
+      : left.coord_y - right.coord_y
+  );
 }
 
 async function refreshAllTeams() {
   try {
-    const [teams, myShips, myModules] = await Promise.all([
+    const [teams, ships, modules, plans, gameParams] = await Promise.all([
       getAllTeams(),
       getShips(state.teamId),
       getModules(state.teamId),
-    ])
-    state.allTeams = teams || []
-    state.myTeam = state.allTeams.find(t => t.idEquipe === state.teamId) || null
-    if (state.myTeam) {
-      // positionX/Y from /equipes/{id}/vaisseaux — inject proprietaire for button gating
-      if (myShips) state.myTeam.vaisseaux = myShips.map(s => ({ ...s, proprietaire: state.teamId }))
-      if (myModules) state.myTeam.modules = myModules
+      getPlans(state.teamId),
+      getGameParams().catch(() => [])
+    ]);
+
+    state.allTeams = teams || [];
+    state.myPlans = plans || [];
+    state.gameParams = gameParams || [];
+    state.myTeam =
+      state.allTeams.find((team) => team.idEquipe === state.teamId) || {
+        idEquipe: state.teamId,
+        nom: "Mon équipe",
+        ressources: []
+      };
+
+    state.myTeam.vaisseaux = (ships || []).map((ship) => ({
+      ...ship,
+      proprietaire: ship.proprietaire || state.teamId
+    }));
+    state.myTeam.modules = modules || [];
+    state.teamName = state.myTeam.nom || "";
+
+    updateHUD(state.myTeam);
+    updateLeaderboard(state.allTeams);
+
+    if (state.selectedShip?.idVaisseau) {
+      const refreshedShip = state.myTeam.vaisseaux.find((ship) => ship.idVaisseau === state.selectedShip.idVaisseau);
+      if (refreshedShip) {
+        state.selectedShip = refreshedShip;
+        showShipInfo(refreshedShip);
+      }
     }
-    updateHUD(state.myTeam)
-    updateLeaderboard(state.allTeams)
-  } catch (e) {
-    console.error('Teams error:', e)
-    notify('Erreur équipes: ' + e.message, 'error')
+  } catch (error) {
+    notify(`Erreur équipes: ${error.message}`, "error");
   }
 }
 
 function updateMinimapData(cells) {
-  cells.forEach(cell => {
-    if (!cell.planete) return
-    const key = `${cell.coord_x}_${cell.coord_y}`
-    const existing = state.minimapPlanets.findIndex(p => p.key === key)
-    const entry = {
+  cells.forEach((cell) => {
+    if (!cell.planete) {
+      return;
+    }
+
+    const key = `${cell.coord_x}_${cell.coord_y}`;
+    const payload = {
       key,
       x: cell.coord_x,
       y: cell.coord_y,
       ownerId: cell.proprietaire?.idEquipe || null,
-      type: cell.planete.modelePlanete?.typePlanete,
+      type: cell.planete.modelePlanete?.typePlanete || null
+    };
+
+    const index = state.minimapPlanets.findIndex((planet) => planet.key === key);
+    if (index === -1) {
+      state.minimapPlanets.push(payload);
+    } else {
+      state.minimapPlanets[index] = payload;
     }
-    if (existing === -1) state.minimapPlanets.push(entry)
-    else state.minimapPlanets[existing] = entry
-  })
+  });
 }
 
-// ── Button registration ────────────────────────────────────────
+function centerViewOnFleet() {
+  const firstShip = state.myTeam?.vaisseaux?.[0];
+  if (!firstShip || firstShip.positionX === undefined || firstShip.positionY === undefined) {
+    return;
+  }
+
+  state.viewX = Math.max(0, Math.min(58 - state.viewSize, firstShip.positionX - Math.floor(state.viewSize / 2)));
+  state.viewY = Math.max(0, Math.min(58 - state.viewSize, firstShip.positionY - Math.floor(state.viewSize / 2)));
+  panCameraTo(state.viewX, state.viewY, false);
+  refreshMap();
+}
+
+function initializeMapView() {
+  if (state.fullMapMode) {
+    state.viewX = 0;
+    state.viewY = 0;
+    state.viewSize = state.mapWorldSize;
+    focusOnWholeMap();
+    updateMapModeButton();
+    refreshMap();
+    return;
+  }
+
+  centerViewOnFleet();
+  updateMapModeButton();
+}
+
+function startGameLoop() {
+  let previousTime = 0;
+
+  const loop = (timestamp) => {
+    const delta = (timestamp - previousTime) / 1000;
+    previousTime = timestamp;
+
+    handleKeyMovement(delta);
+    animateMap(delta);
+    render();
+    requestAnimationFrame(loop);
+  };
+
+  requestAnimationFrame(loop);
+}
+
+function scheduleAutoSync() {
+  let running = false;
+
+  setInterval(async () => {
+    if (running) {
+      return;
+    }
+
+    running = true;
+    await fullSync();
+    running = false;
+  }, 10000);
+}
+
 function registerButtons() {
-  // Refresh / sync button
-  const refreshBtn = document.getElementById('refresh-btn')
-  refreshBtn.addEventListener('click', async () => {
-    if (refreshBtn.disabled) return
-    refreshBtn.disabled = true
-    refreshBtn.textContent = '⟳ ...'
-    await Promise.allSettled([refreshMap(), refreshAllTeams()])
-    const now = new Date().toLocaleTimeString('fr-FR', {
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    })
-    refreshBtn.textContent = `⟳ ${now}`
-    refreshBtn.disabled = false
-  })
+  const mapModeButton = document.getElementById("map-mode-btn");
+  const refreshButton = document.getElementById("refresh-btn");
+  refreshButton.addEventListener("click", async () => {
+    refreshButton.disabled = true;
+    refreshButton.textContent = "Sync...";
+    await fullSync();
+    refreshButton.textContent = "Sync";
+    refreshButton.disabled = false;
+  });
 
-  // Leaderboard toggle
-  document.getElementById('lb-toggle').addEventListener('click', () => {
-    document.getElementById('leaderboard').classList.toggle('hidden')
-  })
+  mapModeButton.addEventListener("click", async () => {
+    state.fullMapMode = !state.fullMapMode;
 
-  // Market button
-  document.getElementById('market-btn').addEventListener('click', () => openMarket())
+    if (state.fullMapMode) {
+      state.viewX = 0;
+      state.viewY = 0;
+      state.viewSize = state.mapWorldSize;
+      focusOnWholeMap();
+    } else {
+      state.viewSize = 18;
+      centerViewOnFleet();
+    }
 
-  // Market modal close
-  document.getElementById('market-close').addEventListener('click', () => {
-    document.getElementById('market-modal').classList.add('hidden')
-  })
+    updateMapModeButton();
+    await refreshMap();
+  });
 
-  // Ship builder close/cancel
-  document.getElementById('builder-close').addEventListener('click', () => {
-    document.getElementById('builder-modal').classList.add('hidden')
-  })
-  document.getElementById('builder-cancel').addEventListener('click', () => {
-    document.getElementById('builder-modal').classList.add('hidden')
-  })
+  document.getElementById("lb-toggle").addEventListener("click", () => {
+    document.getElementById("leaderboard").classList.toggle("hidden");
+  });
 
-  // Rename modal close/cancel
-  document.getElementById('rename-close').addEventListener('click', () => {
-    document.getElementById('rename-modal').classList.add('hidden')
-  })
-  document.getElementById('rename-cancel').addEventListener('click', () => {
-    document.getElementById('rename-modal').classList.add('hidden')
-  })
+  document.getElementById("market-btn").addEventListener("click", () => {
+    openMarket();
+  });
 
-  // Close modals on overlay click
-  ;['market-modal', 'builder-modal', 'rename-modal'].forEach(id => {
-    document.getElementById(id).addEventListener('click', e => {
-      if (e.target === e.currentTarget) {
-        e.currentTarget.classList.add('hidden')
+  ["market", "builder", "rename"].forEach((prefix) => {
+    const modal = document.getElementById(`${prefix}-modal`);
+    const closeButton = document.getElementById(`${prefix}-close`);
+    closeButton?.addEventListener("click", () => modal.classList.add("hidden"));
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) {
+        modal.classList.add("hidden");
       }
-    })
-  })
+    });
+  });
+
+  document.getElementById("builder-cancel").addEventListener("click", () => {
+    document.getElementById("builder-modal").classList.add("hidden");
+  });
+
+  document.getElementById("rename-cancel").addEventListener("click", () => {
+    document.getElementById("rename-modal").classList.add("hidden");
+  });
 }
 
-// ── Input ──────────────────────────────────────────────────────
-const keys = {}
-let shipSelectIndex = 0
+function updateMapModeButton() {
+  const button = document.getElementById("map-mode-btn");
+  if (!button) {
+    return;
+  }
 
-function selectShipByIndex(index) {
-  const ships = state.myTeam?.vaisseaux
-  if (!ships || ships.length === 0) {
-    notify('Aucun vaisseau disponible', 'error')
-    return
-  }
-  shipSelectIndex = ((index % ships.length) + ships.length) % ships.length
-  const vaisseau = ships[shipSelectIndex]
-  state.selectedShip = vaisseau
-  state.selectedPlanet = null
-  showShipInfo(vaisseau)
-  if (vaisseau.idVaisseau) highlightShip(vaisseau.idVaisseau, true)
-  if (vaisseau.positionX !== undefined) {
-    const newX = Math.max(0, Math.min(58 - state.viewSize, vaisseau.positionX - Math.floor(state.viewSize / 2)))
-    const newY = Math.max(0, Math.min(58 - state.viewSize, vaisseau.positionY - Math.floor(state.viewSize / 2)))
-    state.viewX = newX
-    state.viewY = newY
-    focusOnShip(vaisseau.positionX, vaisseau.positionY)
-    scheduleMapRefresh()
-  }
-  notify(`Vaisseau ${shipSelectIndex + 1}/${ships.length} : ${vaisseau.nom}`, 'info')
+  button.textContent = state.fullMapMode ? "Vue Secteur" : "Carte Totale";
 }
 
 function registerInput() {
-  window.addEventListener('keydown', e => {
-    keys[e.key] = true
-    if (e.key === 'Escape') {
-      clearPendingAction()
-      closeInfoPanel()
+  window.addEventListener("keydown", (event) => {
+    keys[event.key] = true;
+
+    if (event.key === "Escape") {
+      clearPendingAction();
+      closeInfoPanel();
     }
-    if (e.key === 'Tab') {
-      e.preventDefault()
-      selectShipByIndex(e.shiftKey ? shipSelectIndex - 1 : shipSelectIndex + 1)
+
+    if (event.key === "Tab") {
+      event.preventDefault();
+      selectShipByIndex(event.shiftKey ? teamSelectIndex - 1 : teamSelectIndex + 1);
     }
-  })
-  window.addEventListener('keyup', e => { keys[e.key] = false })
+  });
 
-  // Click to select on the 3D canvas
-  const raycaster = new THREE.Raycaster()
-  const mouse = new THREE.Vector2()
-  let lastClick = 0
+  window.addEventListener("keyup", (event) => {
+    keys[event.key] = false;
+  });
 
-  document.getElementById('canvas-container').addEventListener('click', async (e) => {
-    // Debounce
-    const now = Date.now()
-    if (now - lastClick < 200) return
-    lastClick = now
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
 
-    mouse.x =  (e.clientX / window.innerWidth)  * 2 - 1
-    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1
-    raycaster.setFromCamera(mouse, camera)
+  document.getElementById("canvas-container").addEventListener("click", async (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
 
-    const hit = getClickedObject(raycaster)
+    const hit = getClickedObject(raycaster);
 
-    // If pending action: consume this click as the target coordinates
     if (state.pendingAction) {
-      let cx, cy
-      if (hit) {
-        if (hit.type === 'cell')   { cx = hit.data?.coord_x;  cy = hit.data?.coord_y }
-        if (hit.type === 'planet') { cx = hit.data?.coord_x;  cy = hit.data?.coord_y }
-        if (hit.type === 'ship')   { cx = hit.data?.positionX; cy = hit.data?.positionY }
+      let coordX;
+      let coordY;
+
+      if (hit?.type === "cell") {
+        coordX = hit.data.coord_x;
+        coordY = hit.data.coord_y;
+      } else if (hit?.type === "planet") {
+        coordX = hit.data.coord_x;
+        coordY = hit.data.coord_y;
+      } else if (hit?.type === "ship") {
+        coordX = hit.data.positionX;
+        coordY = hit.data.positionY;
       }
-      if (cx !== undefined && cy !== undefined) {
-        const prevAction = state.pendingAction?.action
-        const executed = await executePendingAction(cx, cy)
+
+      if (coordX !== undefined && coordY !== undefined) {
+        const executed = await executePendingAction(coordX, coordY);
         if (executed) {
-          await refreshMap()
-          await refreshAllTeams()
-          // Re-show entity info if the action targeted a planet
-          if (prevAction === 'ATTAQUER' && hit?.type === 'planet') {
-            const updatedCell = state.mapCells.find(
-              c => c.coord_x === cx && c.coord_y === cy && c.planete
-            )
-            if (updatedCell?.planete) showPlanetInfo(updatedCell.planete)
-          }
-          // Re-show selected ship with updated data
-          if (state.selectedShip) {
-            const updated = state.myTeam?.vaisseaux?.find(
-              v => v.idVaisseau === state.selectedShip.idVaisseau
-            )
-            if (updated) showShipInfo(updated)
-          }
+          await fullSync();
         }
-        return
+        return;
       }
     }
 
     if (!hit) {
-      closeInfoPanel()
-      return
+      closeInfoPanel();
+      return;
     }
 
-    if (hit.type === 'ship') {
-      state.selectedShip = hit.data
-      state.selectedPlanet = null
-      showShipInfo(hit.data)
-      if (state.selectedShip?.idVaisseau) highlightShip(state.selectedShip.idVaisseau, true)
-    } else if (hit.type === 'planet') {
-      state.selectedPlanet = hit.data
-      state.selectedShip = null
-      showPlanetInfo(hit.data)
-    } else {
-      closeInfoPanel()
+    if (hit.type === "ship") {
+      state.selectedShip = hit.data;
+      state.selectedPlanet = null;
+      showShipInfo(hit.data);
+      highlightShip(hit.data.idVaisseau, true);
+      return;
     }
-  })
+
+    if (hit.type === "planet") {
+      state.selectedPlanet = hit.data;
+      state.selectedShip = null;
+      showPlanetInfo(hit.data);
+      return;
+    }
+
+    closeInfoPanel();
+  });
 }
 
-// ── Keyboard map movement ──────────────────────────────────────
-const moveAccum = { x: 0, y: 0 }
+function selectShipByIndex(index) {
+  const ships = state.myTeam?.vaisseaux || [];
+  if (!ships.length) {
+    notify("Aucun vaisseau disponible", "error");
+    return;
+  }
+
+  teamSelectIndex = ((index % ships.length) + ships.length) % ships.length;
+  const ship = ships[teamSelectIndex];
+
+  state.selectedShip = ship;
+  state.selectedPlanet = null;
+  showShipInfo(ship);
+  highlightShip(ship.idVaisseau, true);
+
+  if (ship.positionX !== undefined && ship.positionY !== undefined) {
+    if (state.fullMapMode) {
+      return;
+    }
+
+    state.viewX = Math.max(0, Math.min(58 - state.viewSize, ship.positionX - Math.floor(state.viewSize / 2)));
+    state.viewY = Math.max(0, Math.min(58 - state.viewSize, ship.positionY - Math.floor(state.viewSize / 2)));
+    focusOnShip(ship.positionX, ship.positionY);
+    scheduleMapRefresh();
+  }
+}
 
 function handleKeyMovement(delta) {
-  const speed = 8 * delta
-
-  if (keys['ArrowLeft']  || keys['a'] || keys['A']) moveAccum.x -= speed
-  if (keys['ArrowRight'] || keys['d'] || keys['D']) moveAccum.x += speed
-  if (keys['ArrowUp']    || keys['w'] || keys['W']) moveAccum.y -= speed
-  if (keys['ArrowDown']  || keys['s'] || keys['S']) moveAccum.y += speed
-
-  if (Math.abs(moveAccum.x) >= 1) {
-    const step = Math.sign(moveAccum.x) * Math.floor(Math.abs(moveAccum.x))
-    state.viewX = Math.max(0, Math.min(58 - state.viewSize, state.viewX + step))
-    moveAccum.x -= step
-    panCameraTo(state.viewX, state.viewY)
-    scheduleMapRefresh()
+  if (state.fullMapMode) {
+    return;
   }
-  if (Math.abs(moveAccum.y) >= 1) {
-    const step = Math.sign(moveAccum.y) * Math.floor(Math.abs(moveAccum.y))
-    state.viewY = Math.max(0, Math.min(58 - state.viewSize, state.viewY + step))
-    moveAccum.y -= step
-    panCameraTo(state.viewX, state.viewY)
-    scheduleMapRefresh()
+
+  const speed = 8 * delta;
+
+  if (keys.ArrowLeft || keys.a || keys.A) {
+    moveAccumulator.x -= speed;
+  }
+  if (keys.ArrowRight || keys.d || keys.D) {
+    moveAccumulator.x += speed;
+  }
+  if (keys.ArrowUp || keys.w || keys.W) {
+    moveAccumulator.y -= speed;
+  }
+  if (keys.ArrowDown || keys.s || keys.S) {
+    moveAccumulator.y += speed;
+  }
+
+  let moved = false;
+
+  if (Math.abs(moveAccumulator.x) >= 1) {
+    const step = Math.sign(moveAccumulator.x) * Math.floor(Math.abs(moveAccumulator.x));
+    state.viewX = Math.max(0, Math.min(58 - state.viewSize, state.viewX + step));
+    moveAccumulator.x -= step;
+    moved = true;
+  }
+
+  if (Math.abs(moveAccumulator.y) >= 1) {
+    const step = Math.sign(moveAccumulator.y) * Math.floor(Math.abs(moveAccumulator.y));
+    state.viewY = Math.max(0, Math.min(58 - state.viewSize, state.viewY + step));
+    moveAccumulator.y -= step;
+    moved = true;
+  }
+
+  if (moved) {
+    panCameraTo(state.viewX, state.viewY);
+    scheduleMapRefresh();
   }
 }
 
-let moveRefreshTimeout = null
+let mapRefreshTimer = null;
+
 function scheduleMapRefresh() {
-  clearTimeout(moveRefreshTimeout)
-  moveRefreshTimeout = setTimeout(async () => {
-    clearMap()
-    await refreshMap()
-  }, 250)
+  clearTimeout(mapRefreshTimer);
+  mapRefreshTimer = setTimeout(() => {
+    refreshMap();
+  }, 180);
 }
 
-main().catch(console.error)
+main().catch((error) => {
+  console.error(error);
+  notify(error.message, "error");
+});

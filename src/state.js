@@ -1,32 +1,25 @@
-// Shared application state
 export const state = {
-  // Auth
-  token: '',
-  teamId: '',
-  teamName: '',
+  token: "",
+  teamId: "",
+  teamName: "",
 
-  // Map viewport (top-left corner in game coords)
   viewX: 0,
   viewY: 0,
   viewSize: 18,
+  fullMapMode: true,
+  mapWorldSize: 58,
 
-  // Game data
-  mapCells: [],       // Array<Case> from API
-  allTeams: [],       // Array<Equipe>
-  myTeam: null,       // Equipe
+  mapCells: [],
+  allTeams: [],
+  myTeam: null,
+  myPlans: [],
+  gameParams: [],
 
-  // Selection
   selectedShip: null,
   selectedPlanet: null,
-  selectedCell: null,
 
-  // Minimap data (full visible planets from multiple queries)
   minimapPlanets: [],
-
-  // Pending ship action (waiting for click target)
   pendingAction: null,
 
-  // Refresh control
-  lastRefresh: 0,
-  refreshInterval: 5000, // ms
-}
+  actions: {}
+};

@@ -3,6 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
+      "name": "space-conquerors",
       "dependencies": {
         "three": "^0.183.2",
       },
