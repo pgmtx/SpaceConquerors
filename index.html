@@ -73,6 +73,22 @@
       color: #ff88ff; box-shadow: 0 0 12px rgba(200,0,255,0.5);
     }
     #bot-btn:disabled { opacity: 0.5; cursor: wait; }
+    #mine-btn {
+      font-family: 'Courier New', monospace;
+      font-size: 12px; letter-spacing: 1px;
+      padding: 5px 14px;
+      background: rgba(0,40,10,0.7); border: 1px solid rgba(0,200,80,0.6);
+      color: #88ffaa; border-radius: 4px; cursor: pointer;
+      transition: all 0.15s; pointer-events: all;
+    }
+    #mine-btn:hover:not(:disabled) {
+      background: rgba(0,80,20,0.9); box-shadow: 0 0 8px rgba(0,255,100,0.4);
+    }
+    #mine-btn.active {
+      background: rgba(0,60,15,0.9); border-color: rgba(0,255,100,0.9);
+      color: #aaffcc; box-shadow: 0 0 12px rgba(0,255,80,0.5);
+    }
+    #mine-btn:disabled { opacity: 0.5; cursor: wait; }
 
     /* ── MINIMAP ───────────────────────────────── */
     #minimap-container {
@@ -248,6 +264,7 @@
     <div id="coords-display">[ X:0 Y:0 ]</div>
     <button id="refresh-btn">⟳ Rafraîchir</button>
     <button id="bot-btn">⚡ Bot OFF</button>
+    <button id="mine-btn">⛏ Mine OFF</button>
     <div id="resources">
       <div class="resource-chip"><span class="icon">⛏</span><span id="res-minerai">0</span></div>
       <div class="resource-chip"><span class="icon">💰</span><span id="res-credits">0</span></div>

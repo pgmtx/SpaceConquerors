@@ -41,6 +41,7 @@ import {
 import { preloadAllModels } from "./models.js";
 import { state } from "./state.js";
 import { startBot, stopBot, isBotActive } from "./bot.js";
+import { startMiningBot, stopMiningBot, isMiningBotActive } from "./bot-mining.js";
 
 // ── Bootstrap ─────────────────────────────────────────────────
 async function main() {
@@ -86,6 +87,7 @@ async function main() {
 	registerInput();
 	registerRefreshButton();
 	registerBotButton();
+	registerMineButton();
 }
 
 // ── Game loop ─────────────────────────────────────────────────
@@ -379,6 +381,26 @@ function registerBotButton() {
 			await startBot();
 			btn.disabled = false;
 			btn.textContent = "⚡ Bot ON";
+			btn.classList.add("active");
+		}
+	});
+}
+
+// ── Mine bot toggle ───────────────────────────────────────────
+function registerMineButton() {
+	const btn = document.getElementById("mine-btn");
+	if (!btn) return;
+	btn.addEventListener("click", async () => {
+		if (isMiningBotActive()) {
+			stopMiningBot();
+			btn.textContent = "⛏ Mine OFF";
+			btn.classList.remove("active");
+		} else {
+			btn.disabled = true;
+			btn.textContent = "⛏ Scan...";
+			await startMiningBot();
+			btn.disabled = false;
+			btn.textContent = "⛏ Mine ON";
 			btn.classList.add("active");
 		}
 	});
