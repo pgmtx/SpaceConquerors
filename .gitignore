@@ -1,2 +1,4 @@
 .env
 node_modules/
+generate_token.sh
+tokens.json
