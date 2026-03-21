@@ -4,6 +4,7 @@
 import { doAction, getShips, getMap } from "./api.js";
 import { state } from "./state.js";
 import { notify } from "./ui.js";
+import { getRole, Role } from "./assignments.js";
 
 // ── Constantes ────────────────────────────────────────────────
 const TICK_MS               = 3_000;
@@ -513,8 +514,10 @@ async function botTick() {
         }
         log("BOT", `${ships.length} vaisseau(x) trouvé(s)`);
 
-        // Traiter uniquement les vaisseaux vivants — les détruits sont ignorés
-        const activeShips = ships.filter(s => (s.pointDeVie ?? 1) > 0);
+        // Traiter les vaisseaux vivants non assignés au minage (ATTACK ou IDLE)
+        const activeShips = ships.filter(s =>
+            (s.pointDeVie ?? 1) > 0 && getRole(s.idVaisseau) !== Role.MINE
+        );
 
         for (const ship of activeShips) {
             await tickShip(ship);

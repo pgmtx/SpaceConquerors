@@ -1,9 +1,9 @@
 // Bot minier — génère des crédits via le cycle RECOLTER → DEPOSER
-// Flux : trouver planète ressource → RECOLTER → aller dépôt → DEPOSER (→ crédits)
 
 import { doAction, getShips, getMap, getTeam } from "./api.js";
 import { state } from "./state.js";
 import { notify } from "./ui.js";
+import { getRole, Role } from "./assignments.js";
 
 // ── Constantes ────────────────────────────────────────────────
 const TICK_MS  = 3_000;
@@ -11,29 +11,20 @@ const MAP_SIZE = 58;
 const CHUNK    = 18;
 
 const MinePhase = Object.freeze({
-    FIND_DEPOT:        "FIND_DEPOT",
-    FIND_RESOURCE:     "FIND_RESOURCE",
-    MOVE_TO_RESOURCE:  "MOVE_TO_RESOURCE",
-    HARVEST:           "HARVEST",
-    MOVE_TO_DEPOT:     "MOVE_TO_DEPOT",
-    DEPOSIT:           "DEPOSIT",
+    GOTO_RESOURCE: "GOTO_RESOURCE",
+    HARVEST:       "HARVEST",
+    GOTO_DEPOT:    "GOTO_DEPOT",
+    DEPOSIT:       "DEPOSIT",
 });
 
 // ── État global ───────────────────────────────────────────────
-// Notre planète avec module DECHARGEMENT_RESSOURCE
-let depotPos = null; // { x, y }
-
-// Planètes connues (obstacles BFS) : key "x_y" → { x, y }
-const allPlanets = new Map();
-// Planètes avec minerai : key "x_y" → { x, y }
-const resourcePlanets = new Map();
-// Cases déclarées inaccessibles par le serveur → obstacles temporaires BFS
+let depotPos = null;
+const depotPlanetIds  = new Set(); // IDs planètes avec DECHARGEMENT_RESSOURCE (API équipe)
+const allPlanets      = new Map(); // key "x_y" → { x, y }  (obstacles BFS)
+const resourcePlanets = new Map(); // key "x_y" → { x, y }  (planètes avec minerai)
 const inaccessibleCells = new Set();
+const mineState       = new Map(); // shipId → { phase, target }
 
-// État par vaisseau : shipId → { phase, target }
-const mineState = new Map();
-
-// ── Guard anti-concurrence ────────────────────────────────────
 let mineActive   = false;
 let mineInterval = null;
 let tickRunning  = false;
@@ -54,13 +45,11 @@ function isAdjacent(x1, y1, x2, y2) {
     return chebyshevDist(x1, y1, x2, y2) === 1;
 }
 
-// BFS : premier pas vers (tx,ty), évite planètes et cases inaccessibles connues
 function findNextStep(sx, sy, tx, ty) {
     if (isAdjacent(sx, sy, tx, ty)) return null;
     const startKey = `${sx}_${sy}`;
     const parent   = new Map([[startKey, null]]);
     const queue    = [{ x: sx, y: sy }];
-
     while (queue.length > 0) {
         const { x, y } = queue.shift();
         for (let dx = -1; dx <= 1; dx++) {
@@ -70,7 +59,6 @@ function findNextStep(sx, sy, tx, ty) {
                 if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
                 const nkey = `${nx}_${ny}`;
                 if (parent.has(nkey)) continue;
-                // Évite les planètes (sauf la cible) et les cases inaccessibles
                 if (allPlanets.has(nkey) && !(nx === tx && ny === ty)) continue;
                 if (inaccessibleCells.has(nkey)) continue;
                 parent.set(nkey, `${x}_${y}`);
@@ -87,7 +75,6 @@ function findNextStep(sx, sy, tx, ty) {
     return null;
 }
 
-// ── Gestion erreurs ───────────────────────────────────────────
 function parseCooldownMs(msg) {
     const timeMatch = msg.match(/(\d{2}):(\d{2}):(\d{2})/);
     if (timeMatch) {
@@ -105,7 +92,6 @@ function isCooldownError(msg) {
     return /cooldown|disponible|attendre|wait|trop t.t|prochaine/i.test(msg);
 }
 
-// "Case cible inaccessible (obstacle ou case vide)"
 function isInaccessibleError(msg) {
     return /inaccessible|case vide|obstacle/i.test(msg);
 }
@@ -134,14 +120,18 @@ function updateFromCells(cells) {
         const key = `${cell.coord_x}_${cell.coord_y}`;
         allPlanets.set(key, { x: cell.coord_x, y: cell.coord_y });
 
-        // On ne peut voir/miner que nos planètes ou les planètes neutres (sans proprio)
-        // Les planètes ennemies ne retournent pas mineraiDisponible
-        const ownerId = cell.proprietaire?.idEquipe ?? null;
+        // Matcher l'identifiant de planète avec ceux connus comme dépôt
+        if (!depotPos && depotPlanetIds.has(cell.planete.identifiant)) {
+            depotPos = { x: cell.coord_x, y: cell.coord_y };
+            log("DEPOT", `Dépôt résolu : (${depotPos.x},${depotPos.y})`);
+        }
+
+        // Ressources : seulement nos planètes ou neutres
+        const ownerId   = cell.proprietaire?.idEquipe ?? null;
         const isOurs    = ownerId === state.teamId;
         const isNeutral = ownerId === null;
         if (!isOurs && !isNeutral) continue;
 
-        // Spec: mineraiDisponible = quantité de minerai sur la planète
         const minerai = cell.planete.mineraiDisponible ?? 0;
         if (minerai > 0) {
             resourcePlanets.set(key, { x: cell.coord_x, y: cell.coord_y });
@@ -163,69 +153,45 @@ async function scanArea(x1, y1, x2, y2) {
     }
 }
 
-// ── Découverte du dépôt ───────────────────────────────────────
-// Cherche notre planète avec module DECHARGEMENT_RESSOURCE (toujours sur la planète de départ).
-async function refreshDepot() {
+// Récupère les IDs de planètes avec DECHARGEMENT_RESSOURCE depuis l'API équipe
+async function loadDepotIds() {
+    if (depotPlanetIds.size > 0) return;
     try {
         const team = await getTeam(state.teamId);
-        // Spec: Equipe.planetes → array de Planete avec leurs modules posés
-        const planets = team.planetes ?? [];
-
-        for (const p of planets) {
-            const modules = p.modules ?? [];
-            const hasUnload = modules.some(
+        for (const p of team.planetes ?? []) {
+            const hasUnload = (p.modules ?? []).some(
                 m => m.paramModule?.typeModule === 'DECHARGEMENT_RESSOURCE'
             );
-            if (hasUnload) {
-                const x = p.coord_x;
-                const y = p.coord_y;
-                if (x !== undefined && y !== undefined) {
-                    depotPos = { x, y };
-                    allPlanets.set(`${x}_${y}`, { x, y }); // obstacle BFS
-                    log("DEPOT", `Dépôt (DECHARGEMENT_RESSOURCE) : (${x},${y})`);
-                    return;
-                }
+            if (hasUnload && p.identifiant) {
+                depotPlanetIds.add(p.identifiant);
+                log("DEPOT", `ID dépôt enregistré : ${p.identifiant}`);
+            }
+            // Si les coords sont là directement (bonus)
+            if (hasUnload && p.coord_x !== undefined && !depotPos) {
+                depotPos = { x: p.coord_x, y: p.coord_y };
+                log("DEPOT", `Coords directes via API : (${depotPos.x},${depotPos.y})`);
             }
         }
-
-        // Fallback : première planète connue
-        if (planets.length > 0) {
-            const p = planets[0];
-            const x = p.coord_x;
-            const y = p.coord_y;
-            if (x !== undefined && y !== undefined) {
-                depotPos = { x, y };
-                allPlanets.set(`${x}_${y}`, { x, y });
-                log("DEPOT", `Dépôt (fallback 1ère planète) : (${x},${y})`);
-                return;
-            }
-        }
-
-        log("DEPOT", `Impossible de trouver le dépôt. Planètes: ${JSON.stringify(planets).slice(0, 200)}`);
     } catch (e) {
-        log("DEPOT", `Erreur : ${e.message}`);
+        log("DEPOT", `Erreur API équipe : ${e.message}`);
     }
 }
 
 // ── Cargo ─────────────────────────────────────────────────────
-// Spec: Vaisseau.mineraiTransporte = minerai transporté par le vaisseau
 function getMineraiTransporte(ship) {
     return ship.mineraiTransporte ?? 0;
 }
 
-function getCapaciteMax(ship) {
-    return ship.type?.capaciteTransport ?? Infinity;
-}
-
 function isCargoFull(ship) {
-    return getMineraiTransporte(ship) >= getCapaciteMax(ship);
+    const cap = ship.type?.capaciteTransport ?? Infinity;
+    return getMineraiTransporte(ship) >= cap;
 }
 
 function hasCargoToDeposit(ship) {
     return getMineraiTransporte(ship) > 0;
 }
 
-// ── Sélection planète ressource ───────────────────────────────
+// Planète la plus proche avec minerai
 function getNearestResource(sx, sy) {
     let best = null, bestDist = Infinity;
     for (const [key, rp] of resourcePlanets) {
@@ -236,6 +202,27 @@ function getNearestResource(sx, sy) {
     return best;
 }
 
+// ── Déplacement ───────────────────────────────────────────────
+async function moveToward(ship, tx, ty) {
+    const sx = ship.positionX, sy = ship.positionY;
+    const step = findNextStep(sx, sy, tx, ty);
+    if (!step) { log(ship.nom, `Aucun chemin vers (${tx},${ty})`); return false; }
+    const stepKey = `${step.x}_${step.y}`;
+    try {
+        await doActionWithCooldown(state.teamId, ship.idVaisseau, "DEPLACEMENT", step.x, step.y);
+        log(ship.nom, `→ (${step.x},${step.y})`);
+        return true;
+    } catch (e) {
+        if (isInaccessibleError(e.message)) {
+            inaccessibleCells.add(stepKey);
+            log(ship.nom, `Case (${step.x},${step.y}) inaccessible, blacklistée`);
+        } else {
+            log(ship.nom, `Erreur déplacement : ${e.message}`);
+        }
+        return false;
+    }
+}
+
 // ── Tick par vaisseau ─────────────────────────────────────────
 async function tickMineShip(ship) {
     const id = ship.idVaisseau;
@@ -244,143 +231,98 @@ async function tickMineShip(ship) {
     if (sx === undefined || sy === undefined) return;
 
     if (!mineState.has(id)) {
-        const initPhase = hasCargoToDeposit(ship)
-            ? MinePhase.MOVE_TO_DEPOT
-            : MinePhase.FIND_DEPOT;
-        mineState.set(id, { phase: initPhase, target: null });
+        mineState.set(id, {
+            phase:  hasCargoToDeposit(ship) ? MinePhase.GOTO_DEPOT : MinePhase.GOTO_RESOURCE,
+            target: null,
+        });
     }
     const ms = mineState.get(id);
 
     const cargo = getMineraiTransporte(ship);
-    const cap   = getCapaciteMax(ship);
-    log(ship.nom, `[${ms.phase}] pos=(${sx},${sy}) cargo=${cargo}/${cap} cible=${ms.target?.key ?? "—"}`);
+    log(ship.nom, `[${ms.phase}] pos=(${sx},${sy}) cargo=${cargo} cible=${ms.target?.key ?? "—"}`);
+
+    // Scanner autour du vaisseau à chaque tick (résout dépôt + ressources)
+    await scanArea(sx - 9, sy - 9, sx + 9, sy + 9);
+
+    // Charger les IDs de dépôt si pas encore fait
+    if (depotPlanetIds.size === 0) await loadDepotIds();
 
     switch (ms.phase) {
 
-        case MinePhase.FIND_DEPOT: {
-            if (!depotPos) await refreshDepot();
-            if (!depotPos) { log(ship.nom, "Pas de dépôt disponible"); return; }
-            ms.phase = MinePhase.FIND_RESOURCE;
-            break;
-        }
+        case MinePhase.GOTO_RESOURCE: {
+            // Si cargo plein, aller déposer
+            if (isCargoFull(ship) && depotPos) { ms.phase = MinePhase.GOTO_DEPOT; return; }
 
-        case MinePhase.FIND_RESOURCE: {
-            // Si cargo plein, aller déposer directement
-            if (isCargoFull(ship)) { ms.phase = MinePhase.MOVE_TO_DEPOT; return; }
-
-            await scanArea(sx - 12, sy - 12, sx + 12, sy + 12);
-            let rp = getNearestResource(sx, sy);
-
-            if (!rp) {
-                log(ship.nom, "Scan complet...");
-                for (let cx = 0; cx < MAP_SIZE; cx += CHUNK) {
-                    for (let cy = 0; cy < MAP_SIZE; cy += CHUNK) {
-                        await scanArea(cx, cy, cx + CHUNK - 1, cy + CHUNK - 1);
-                        await sleep(150);
-                    }
+            // Trouver la planète la plus proche avec du minerai
+            if (!ms.target || !resourcePlanets.has(ms.target.key)) {
+                ms.target = getNearestResource(sx, sy);
+                if (!ms.target) {
+                    log(ship.nom, "Aucune planète avec minerai visible — scan étendu");
+                    await scanArea(sx - 15, sy - 15, sx + 15, sy + 15);
+                    ms.target = getNearestResource(sx, sy);
                 }
-                rp = getNearestResource(sx, sy);
+                if (!ms.target) { log(ship.nom, "Aucune ressource trouvée"); return; }
+                log(ship.nom, `Cible : (${ms.target.x},${ms.target.y})`);
             }
 
-            if (!rp) { log(ship.nom, "Aucune planète avec minerai trouvée"); return; }
-            ms.target = rp;
-            ms.phase = isAdjacent(sx, sy, rp.x, rp.y)
-                ? MinePhase.HARVEST
-                : MinePhase.MOVE_TO_RESOURCE;
-            log(ship.nom, `Cible minerai : (${rp.x},${rp.y})`);
-            break;
-        }
-
-        case MinePhase.MOVE_TO_RESOURCE: {
-            if (!ms.target) { ms.phase = MinePhase.FIND_RESOURCE; return; }
             if (isAdjacent(sx, sy, ms.target.x, ms.target.y)) {
-                ms.phase = MinePhase.HARVEST; return;
-            }
-            // Rescanner le prochain pas pour avoir les obstacles à jour
-            const step = findNextStep(sx, sy, ms.target.x, ms.target.y);
-            if (!step) {
-                log(ship.nom, `Aucun chemin vers (${ms.target.x},${ms.target.y}), abandon`);
-                ms.target = null;
-                ms.phase = MinePhase.FIND_RESOURCE;
-                return;
-            }
-            const stepKey = `${step.x}_${step.y}`;
-            try {
-                await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", step.x, step.y);
-                log(ship.nom, `→ (${step.x},${step.y})`);
-            } catch (e) {
-                if (isInaccessibleError(e.message)) {
-                    // Marquer la case comme obstacle pour le BFS
-                    inaccessibleCells.add(stepKey);
-                    log(ship.nom, `Case (${step.x},${step.y}) inaccessible, ajoutée aux obstacles`);
-                } else {
-                    log(ship.nom, `Erreur déplacement : ${e.message}`);
-                }
+                ms.phase = MinePhase.HARVEST;
+            } else {
+                await moveToward(ship, ms.target.x, ms.target.y);
             }
             break;
         }
 
         case MinePhase.HARVEST: {
-            if (!ms.target) { ms.phase = MinePhase.FIND_RESOURCE; return; }
+            if (!ms.target) { ms.phase = MinePhase.GOTO_RESOURCE; return; }
             if (!isAdjacent(sx, sy, ms.target.x, ms.target.y)) {
-                ms.phase = MinePhase.MOVE_TO_RESOURCE; return;
+                ms.phase = MinePhase.GOTO_RESOURCE; return;
             }
-            log(ship.nom, `⛏ RECOLTER sur (${ms.target.x},${ms.target.y})`);
+            log(ship.nom, `⛏ RECOLTER (${ms.target.x},${ms.target.y})`);
             try {
                 const resp = await doActionWithCooldown(state.teamId, id, "RECOLTER", ms.target.x, ms.target.y);
-                const qty = resp?.ressource ?? "?";
-                log(ship.nom, `✓ Récolté ${qty} minerai`);
-                // Si cargo plein ou planète épuisée, aller déposer
-                ms.phase = depotPos ? MinePhase.MOVE_TO_DEPOT : MinePhase.FIND_DEPOT;
+                log(ship.nom, `✓ Récolté ${resp?.ressource ?? "?"} minerai`);
+                // Après récolte : si dépôt connu → aller déposer, sinon re-récolter
+                ms.target = null;
+                ms.phase = depotPos ? MinePhase.GOTO_DEPOT : MinePhase.GOTO_RESOURCE;
             } catch (e) {
-                log(ship.nom, `✗ RECOLTER échoué : ${e.message}`);
-                // Planète épuisée ou action impossible → retirer de la liste et chercher ailleurs
+                log(ship.nom, `✗ RECOLTER : ${e.message}`);
                 resourcePlanets.delete(ms.target.key);
                 ms.target = null;
-                ms.phase = MinePhase.FIND_RESOURCE;
+                ms.phase = MinePhase.GOTO_RESOURCE;
             }
             break;
         }
 
-        case MinePhase.MOVE_TO_DEPOT: {
-            if (!depotPos) { ms.phase = MinePhase.FIND_DEPOT; return; }
-            if (isAdjacent(sx, sy, depotPos.x, depotPos.y)) {
-                ms.phase = MinePhase.DEPOSIT; return;
+        case MinePhase.GOTO_DEPOT: {
+            if (!depotPos) {
+                log(ship.nom, "Dépôt inconnu, récolte d'abord");
+                ms.phase = MinePhase.GOTO_RESOURCE;
+                return;
             }
-            const step = findNextStep(sx, sy, depotPos.x, depotPos.y);
-            if (!step) { log(ship.nom, "Aucun chemin vers le dépôt"); return; }
-            const stepKey = `${step.x}_${step.y}`;
-            try {
-                await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", step.x, step.y);
-                log(ship.nom, `→ dépôt (${step.x},${step.y})`);
-            } catch (e) {
-                if (isInaccessibleError(e.message)) {
-                    inaccessibleCells.add(stepKey);
-                    log(ship.nom, `Case (${step.x},${step.y}) inaccessible, ajoutée aux obstacles`);
-                } else {
-                    log(ship.nom, `Erreur déplacement vers dépôt : ${e.message}`);
-                }
+            if (isAdjacent(sx, sy, depotPos.x, depotPos.y)) {
+                ms.phase = MinePhase.DEPOSIT;
+            } else {
+                await moveToward(ship, depotPos.x, depotPos.y);
             }
             break;
         }
 
         case MinePhase.DEPOSIT: {
-            if (!depotPos) { ms.phase = MinePhase.FIND_DEPOT; return; }
-            if (!isAdjacent(sx, sy, depotPos.x, depotPos.y)) {
-                ms.phase = MinePhase.MOVE_TO_DEPOT; return;
+            if (!depotPos || !isAdjacent(sx, sy, depotPos.x, depotPos.y)) {
+                ms.phase = MinePhase.GOTO_DEPOT; return;
             }
-            log(ship.nom, `💰 DEPOSER sur (${depotPos.x},${depotPos.y})`);
+            log(ship.nom, `💰 DEPOSER (${depotPos.x},${depotPos.y})`);
             try {
                 await doActionWithCooldown(state.teamId, id, "DEPOSER", depotPos.x, depotPos.y);
-                log(ship.nom, "✓ Dépôt effectué → crédits générés !");
-                notify(`[Mine] ${ship.nom} a déposé du minerai → crédits !`, "success");
-                ms.target = null;
-                ms.phase = MinePhase.FIND_RESOURCE;
+                log(ship.nom, "✓ Dépôt → crédits !");
+                notify(`[Mine] ${ship.nom} a déposé → crédits !`, "success");
+                ms.phase = MinePhase.GOTO_RESOURCE;
             } catch (e) {
-                log(ship.nom, `✗ DEPOSER échoué : ${e.message}`);
-                // Le dépôt est peut-être incorrect → recalculer
+                log(ship.nom, `✗ DEPOSER : ${e.message}`);
                 depotPos = null;
-                ms.phase = MinePhase.FIND_DEPOT;
+                depotPlanetIds.clear();
+                ms.phase = MinePhase.GOTO_RESOURCE;
             }
             break;
         }
@@ -393,9 +335,11 @@ async function mineTick() {
     tickRunning = true;
     try {
         const ships = await getShips(state.teamId);
-        if (!ships?.length) { log("BOT", "Aucun vaisseau"); return; }
-        const alive = ships.filter(s => (s.pointDeVie ?? 1) > 0);
-        log("BOT", `${alive.length} vaisseau(x) actif(s)`);
+        if (!ships?.length) return;
+        const alive = ships.filter(s =>
+            (s.pointDeVie ?? 1) > 0 && getRole(s.idVaisseau) === Role.MINE
+        );
+        log("BOT", `${alive.length} vaisseau(x) minier(s) actif(s)`);
         for (const ship of alive) {
             await tickMineShip(ship);
             await sleep(500);
@@ -412,8 +356,9 @@ async function mineTick() {
 export async function startMiningBot() {
     if (mineActive) { notify("[Mine] Déjà actif", "info"); return; }
     mineActive = true;
-    notify("[Mine] Démarrage — recherche dépôt...", "info");
-    await refreshDepot();
+    notify("[Mine] Démarrage...", "info");
+    // Charger les IDs de dépôt en avance (sans bloquer si ça échoue)
+    await loadDepotIds();
     mineInterval = setInterval(mineTick, TICK_MS);
     log("BOT", "Bot minier actif");
     notify("[Mine] Actif ✓", "info");
@@ -426,6 +371,8 @@ export function stopMiningBot() {
     tickRunning = false;
     mineState.clear();
     inaccessibleCells.clear();
+    depotPlanetIds.clear();
+    depotPos = null;
     log("BOT", "Bot minier arrêté");
     notify("[Mine] Arrêté", "info");
 }

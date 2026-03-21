@@ -40,8 +40,9 @@ import {
 } from "./api.js";
 import { preloadAllModels } from "./models.js";
 import { state } from "./state.js";
-import { startBot, stopBot, isBotActive } from "./bot.js";
-import { startMiningBot, stopMiningBot, isMiningBotActive } from "./bot-mining.js";
+import { startBot } from "./bot.js";
+import { startMiningBot } from "./bot-mining.js";
+import { getRole, setRole, Role } from "./assignments.js";
 
 // ── Bootstrap ─────────────────────────────────────────────────
 async function main() {
@@ -86,8 +87,10 @@ async function main() {
 	startGameLoop();
 	registerInput();
 	registerRefreshButton();
-	registerBotButton();
-	registerMineButton();
+
+	// Bots toujours actifs — le rôle du vaisseau contrôle qui fait quoi
+	startBot();
+	startMiningBot();
 }
 
 // ── Game loop ─────────────────────────────────────────────────
@@ -149,6 +152,7 @@ async function refreshAllTeams() {
 		}
 		updateTeamHUD(state.myTeam);
 		updateLeaderboard(state.allTeams);
+		if (myShips) renderShipPanel(myShips);
 	} catch (e) {
 		console.error("Teams error:", e);
 		notify("Erreur équipes: " + e.message, "error");
@@ -366,44 +370,47 @@ function scheduleMapRefresh() {
 	}, 250);
 }
 
-// ── Bot toggle ────────────────────────────────────────────────
-function registerBotButton() {
-	const btn = document.getElementById("bot-btn");
-	if (!btn) return;
-	btn.addEventListener("click", async () => {
-		if (isBotActive()) {
-			stopBot();
-			btn.textContent = "⚡ Bot OFF";
-			btn.classList.remove("active");
-		} else {
-			btn.disabled = true;
-			btn.textContent = "⚡ Scan...";
-			await startBot();
-			btn.disabled = false;
-			btn.textContent = "⚡ Bot ON";
-			btn.classList.add("active");
+// ── Ship assignment panel ─────────────────────────────────────
+function renderShipPanel(ships) {
+	const list = document.getElementById("ship-list");
+	if (!list) return;
+	list.innerHTML = "";
+
+	for (const ship of ships) {
+		const id   = ship.idVaisseau;
+		const role = getRole(id);
+
+		const isDead = (ship.pointDeVie ?? 1) <= 0;
+
+		const row = document.createElement("div");
+		row.className = "ship-row";
+		if (isDead) row.style.opacity = "0.35";
+
+		const name = document.createElement("span");
+		name.className = "ship-name";
+		name.textContent = (isDead ? "✕ " : "") + (ship.nom ?? id.slice(0, 8));
+		name.title = ship.nom ?? id;
+		row.appendChild(name);
+
+		for (const [label, r, cls] of [
+			["⚡", Role.ATTACK, "active-attack"],
+			["⛏", Role.MINE,   "active-mine"],
+			["○",  Role.IDLE,   ""],
+		]) {
+			const btn = document.createElement("button");
+			btn.className = "role-btn" + (role === r ? ` ${cls}` : "");
+			btn.textContent = label;
+			btn.title = r;
+			btn.addEventListener("click", () => {
+				setRole(id, r);
+				renderShipPanel(ships); // re-render pour mettre à jour les actifs
+			});
+			row.appendChild(btn);
 		}
-	});
+
+		list.appendChild(row);
+	}
 }
 
-// ── Mine bot toggle ───────────────────────────────────────────
-function registerMineButton() {
-	const btn = document.getElementById("mine-btn");
-	if (!btn) return;
-	btn.addEventListener("click", async () => {
-		if (isMiningBotActive()) {
-			stopMiningBot();
-			btn.textContent = "⛏ Mine OFF";
-			btn.classList.remove("active");
-		} else {
-			btn.disabled = true;
-			btn.textContent = "⛏ Scan...";
-			await startMiningBot();
-			btn.disabled = false;
-			btn.textContent = "⛏ Mine ON";
-			btn.classList.add("active");
-		}
-	});
-}
 
 main().catch(console.error);

@@ -57,38 +57,6 @@
       background: rgba(0,100,160,0.9); box-shadow: 0 0 8px rgba(0,255,204,0.3);
     }
     #refresh-btn:disabled { opacity: 0.5; cursor: wait; }
-    #bot-btn {
-      font-family: 'Courier New', monospace;
-      font-size: 12px; letter-spacing: 1px;
-      padding: 5px 14px;
-      background: rgba(40,0,80,0.7); border: 1px solid rgba(150,0,255,0.6);
-      color: #cc88ff; border-radius: 4px; cursor: pointer;
-      transition: all 0.15s; pointer-events: all;
-    }
-    #bot-btn:hover:not(:disabled) {
-      background: rgba(80,0,160,0.9); box-shadow: 0 0 8px rgba(180,0,255,0.4);
-    }
-    #bot-btn.active {
-      background: rgba(60,0,120,0.9); border-color: rgba(200,100,255,0.9);
-      color: #ff88ff; box-shadow: 0 0 12px rgba(200,0,255,0.5);
-    }
-    #bot-btn:disabled { opacity: 0.5; cursor: wait; }
-    #mine-btn {
-      font-family: 'Courier New', monospace;
-      font-size: 12px; letter-spacing: 1px;
-      padding: 5px 14px;
-      background: rgba(0,40,10,0.7); border: 1px solid rgba(0,200,80,0.6);
-      color: #88ffaa; border-radius: 4px; cursor: pointer;
-      transition: all 0.15s; pointer-events: all;
-    }
-    #mine-btn:hover:not(:disabled) {
-      background: rgba(0,80,20,0.9); box-shadow: 0 0 8px rgba(0,255,100,0.4);
-    }
-    #mine-btn.active {
-      background: rgba(0,60,15,0.9); border-color: rgba(0,255,100,0.9);
-      color: #aaffcc; box-shadow: 0 0 12px rgba(0,255,80,0.5);
-    }
-    #mine-btn:disabled { opacity: 0.5; cursor: wait; }
 
     /* ── MINIMAP ───────────────────────────────── */
     #minimap-container {
@@ -173,9 +141,45 @@
     .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .action-btn.cooldown { border-color: rgba(255,150,0,0.5); color: #ffaa44; }
 
+    /* ── SHIP CONTROL ──────────────────────────── */
+    #ship-control {
+      position: fixed; top: 60px; left: 20px; width: 200px;
+      background: rgba(0,10,20,0.9); border: 1px solid rgba(0,150,200,0.4);
+      border-radius: 6px; padding: 10px; z-index: 10;
+    }
+    #ship-control h3 {
+      font-size: 11px; letter-spacing: 3px; color: #557799;
+      margin-bottom: 8px; text-transform: uppercase;
+    }
+    .ship-row {
+      display: flex; align-items: center; gap: 4px;
+      margin-bottom: 6px; flex-wrap: wrap;
+    }
+    .ship-name {
+      font-size: 10px; color: #aaddff; flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0;
+    }
+    .role-btn {
+      font-family: 'Courier New', monospace;
+      font-size: 10px; padding: 2px 6px;
+      background: rgba(0,20,40,0.7); border: 1px solid rgba(0,150,200,0.3);
+      color: #557799; border-radius: 3px; cursor: pointer;
+      pointer-events: all; transition: all 0.15s; white-space: nowrap;
+    }
+    .role-btn:hover { border-color: rgba(0,200,255,0.6); color: #aaddff; }
+    .role-btn.active-attack {
+      background: rgba(40,0,80,0.8); border-color: rgba(200,0,255,0.8);
+      color: #ff88ff;
+    }
+    .role-btn.active-mine {
+      background: rgba(0,40,10,0.8); border-color: rgba(0,220,80,0.8);
+      color: #88ffaa;
+    }
+
     /* ── STATS PANEL ───────────────────────────── */
     #stats-panel {
-      position: fixed; top: 60px; left: 20px; width: 200px;
+      position: fixed; top: 185px; left: 20px; width: 200px;
       background: rgba(0,10,20,0.9); border: 1px solid rgba(0,150,200,0.4);
       border-radius: 6px; padding: 10px; z-index: 10;
     }
@@ -263,13 +267,16 @@
     </div>
     <div id="coords-display">[ X:0 Y:0 ]</div>
     <button id="refresh-btn">⟳ Rafraîchir</button>
-    <button id="bot-btn">⚡ Bot OFF</button>
-    <button id="mine-btn">⛏ Mine OFF</button>
     <div id="resources">
       <div class="resource-chip"><span class="icon">⛏</span><span id="res-minerai">0</span></div>
       <div class="resource-chip"><span class="icon">💰</span><span id="res-credits">0</span></div>
       <div class="resource-chip"><span class="icon">🚀</span><span id="res-ships">0</span></div>
     </div>
+  </div>
+
+  <div id="ship-control">
+    <h3>◈ Vaisseaux</h3>
+    <div id="ship-list"></div>
   </div>
 
   <div id="stats-panel">
