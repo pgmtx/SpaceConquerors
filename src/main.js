@@ -6,7 +6,7 @@ import {
   updateTeamHUD, updateLeaderboard, showShipInfo, showPlanetInfo,
   closeInfoPanel, initMinimap, drawMinimap, executePendingAction,
 } from './ui.js'
-import { getToken, getTeamIdFromToken, getMap, getAllTeams } from './api.js'
+import { getTeamIdFromToken, getMap, getAllTeams } from './api.js'
 import { preloadAllModels } from './models.js'
 import { state } from './state.js'
 
@@ -14,10 +14,11 @@ import { state } from './state.js'
 async function main() {
   setLoading(5, 'CONNEXION AU SERVEUR...')
 
-  // Parse token & team ID
-  const token = getToken()
+  // Récupérer le token depuis le serveur proxy pour décoder le team_id
+  const tokenRes = await fetch('/token').then(r => r.json()).catch(() => null)
+  const token = tokenRes?.access_token || ''
   if (!token) {
-    setLoading(0, 'ERREUR: API_TOKEN manquant dans .env')
+    setLoading(0, 'ERREUR: impossible de récupérer le token depuis le serveur')
     return
   }
   state.token = token

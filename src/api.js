@@ -1,16 +1,3 @@
-const BASE_URL = 'http://37.187.156.222:8080'
-
-// Parse token from .env — handles raw JWT or full auth response dump
-function extractToken(raw) {
-  if (!raw) return ''
-  const idx = raw.indexOf('","')
-  return idx !== -1 ? raw.substring(0, idx) : raw
-}
-
-export function getToken() {
-  return extractToken(import.meta.env.API_TOKEN || '')
-}
-
 export function getTeamIdFromToken(token) {
   try {
     const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
@@ -21,11 +8,9 @@ export function getTeamIdFromToken(token) {
 }
 
 async function apiFetch(path, options = {}) {
-  const token = getToken()
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetch(path, {
     ...options,
     headers: {
-      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
       ...options.headers,
     },
