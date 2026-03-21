@@ -166,6 +166,13 @@ export function panCameraTo(gameX, gameY, animate = true) {
   controls.update()
 }
 
+export function focusOnShip(gameX, gameY) {
+  const target = new THREE.Vector3(gameX * CELL + CELL / 2, 0, gameY * CELL + CELL / 2)
+  controls.target.copy(target)
+  camera.position.set(target.x + 4, 12, target.z + 8)
+  controls.update()
+}
+
 export function render(delta) {
   controls.update()
   renderer.render(scene, camera)

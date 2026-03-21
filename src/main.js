@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { initScene, scene, camera, controls, render, worldPos, panCameraTo } from './scene.js'
+import { initScene, scene, camera, controls, render, worldPos, panCameraTo, focusOnShip } from './scene.js'
 import { renderMap, animateMap, getClickedObject, highlightShip, clearMap } from './mapRenderer.js'
 import {
   setLoading, hideLoading, notify, updateCoords,
@@ -93,8 +93,9 @@ async function refreshAllTeams() {
     state.allTeams = teams || []
     state.myTeam = state.allTeams.find(t => t.idEquipe === state.teamId) || null
     // Merge position data from /vaisseaux endpoint (absent dans /equipes)
+    // et forcer proprietaire pour que les boutons d'action s'affichent
     if (state.myTeam && myShips) {
-      state.myTeam.vaisseaux = myShips
+      state.myTeam.vaisseaux = myShips.map(s => ({ ...s, proprietaire: state.teamId }))
     }
     updateTeamHUD(state.myTeam)
     updateLeaderboard(state.allTeams)
@@ -154,7 +155,7 @@ function selectShipByIndex(index) {
     const newY = Math.max(0, Math.min(58 - state.viewSize, vaisseau.positionY - Math.floor(state.viewSize / 2)))
     state.viewX = newX
     state.viewY = newY
-    panCameraTo(newX, newY)
+    focusOnShip(vaisseau.positionX, vaisseau.positionY)
     scheduleMapRefresh()
   }
   notify(`Vaisseau ${shipSelectIndex + 1}/${ships.length} : ${vaisseau.nom}`, 'info')
