@@ -9,7 +9,6 @@ import { notify } from "./ui.js";
 const TICK_MS               = 3_000;
 const CHUNK                 = 18;
 const MAP_SIZE              = 58;
-const CONQUER_DELAY_MS      = 3 * 60_000;
 const STUCK_THRESHOLD       = 3;
 const DIST_WEIGHT           = 0.3;
 const FULL_SCAN_COOLDOWN_MS = 60_000;
@@ -20,11 +19,10 @@ const Phase = Object.freeze({
     ATTACK:       "ATTACK",
     WAIT_CONQUER: "WAIT_CONQUER",
     CONQUER:      "CONQUER",
-    REPAIR:       "REPAIR",
 });
 
 // ── Cache planètes ─────────────────────────────────────────────
-// Clé "x_y" → { x, y, hp, ownerId, stuckCount, lastSeen }
+// Clé "x_y" → { x, y, hp, ownerId, immune, stuckCount, lastSeen }
 const planetCache = new Map();
 const skippedPlanets = new Set();
 const claimedTargets = new Map(); // key → shipId
@@ -38,11 +36,8 @@ const ENEMY_RISK_RADIUS = 3;   // Cases autour d'une cible → pénalité de ris
 const ENEMY_RISK_PENALTY = 200; // Ajouté au score de cible si ennemi proche
 
 // ── État par vaisseau ─────────────────────────────────────────
-// shipId → { phase, target, lastAttackTime, hpBeforeAttack, repairTarget }
+// shipId → { phase, target, lastAttackTime, hpBeforeAttack }
 const shipState = new Map();
-
-// Dernière position connue de chaque vaisseau (survivante au HP=0)
-const lastKnownPos = new Map(); // shipId → { x, y }
 
 // ── Guard anti-concurrence ────────────────────────────────────
 // Empêche deux ticks de tourner en même temps (fullScan > 2s)
@@ -52,9 +47,31 @@ let lastFullScan = 0;
 // ── Utilitaires ───────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function isAvailable(ship) {
-    if (!ship.dateProchaineAction) return true;
-    return new Date(ship.dateProchaineAction) <= new Date();
+// Parse le temps restant depuis un message d'erreur de cooldown (en secondes)
+// Ex: "Cooldown: 12.5s" ou "action disponible dans 8 secondes" etc.
+function parseCooldownMs(msg) {
+    const m = msg.match(/(\d+(?:[.,]\d+)?)\s*s/i);
+    if (m) return Math.ceil(parseFloat(m[1].replace(',', '.'))) * 1000 + 1000;
+    return null;
+}
+
+function isCooldownError(msg) {
+    return /cooldown|disponible|attendre|wait|trop t.t|prochaine/i.test(msg);
+}
+
+// Effectue une action ; si l'API répond "cooldown", attend le délai indiqué + 1s puis relance une fois.
+async function doActionWithCooldown(teamId, shipId, action, x, y) {
+    try {
+        return await doAction(teamId, shipId, action, x, y);
+    } catch (e) {
+        if (isCooldownError(e.message)) {
+            const wait = parseCooldownMs(e.message) ?? 6_000;
+            log(shipId, `Cooldown détecté (${action}), attente ${wait}ms — "${e.message}"`);
+            await sleep(wait);
+            return await doAction(teamId, shipId, action, x, y);
+        }
+        throw e;
+    }
 }
 
 function chebyshevDist(x1, y1, x2, y2) {
@@ -153,12 +170,14 @@ function updateCache(cells) {
             existing.hp = hp;
             existing.ownerId = ownerId;
             existing.lastSeen = Date.now();
+            // immune reste intact une fois marquée
         } else {
             planetCache.set(key, {
                 x: cell.coord_x,
                 y: cell.coord_y,
                 hp,
                 ownerId,
+                immune: false,
                 stuckCount: 0,
                 lastSeen: Date.now(),
             });
@@ -198,6 +217,9 @@ async function fullScan() {
 }
 
 // ── Sélection de cible ────────────────────────────────────────
+// Planètes dont on sait qu'elles sont invulnérables (stuckCount >= STUCK_THRESHOLD)
+// → déjà dans skippedPlanets, mais on les filtre aussi ici pour être sûr
+
 function getBestTarget(shipX, shipY, myShipId) {
     const myId = state.teamId;
     let best = null;
@@ -205,9 +227,17 @@ function getBestTarget(shipX, shipY, myShipId) {
 
     for (const [key, planet] of planetCache) {
         if (skippedPlanets.has(key)) continue;
+        // Ne cibler que les planètes non possédées par nous
         if (planet.ownerId === myId) continue;
         // Impossible d'agir sur une planète à la même case que le vaisseau
         if (planet.x === shipX && planet.y === shipY) continue;
+        // Ignorer les planètes immunisées (inattaquables)
+        if (planet.immune) continue;
+        // Ignorer les planètes déjà répertoriées comme immunisées via stuckCount
+        if ((planet.stuckCount ?? 0) >= STUCK_THRESHOLD) {
+            skippedPlanets.add(key);
+            continue;
+        }
 
         const claimer = claimedTargets.get(key);
         if (claimer && claimer !== myShipId) continue;
@@ -247,19 +277,6 @@ function abandonTarget(id, ss, skip = false) {
 
 // ── Tick par vaisseau ─────────────────────────────────────────
 async function tickShip(ship) {
-    if ((ship.pointDeVie ?? 1) === 0) {
-        log(ship.nom, `Détruit (HP=0), en attente de réparation`);
-        return;
-    }
-
-    if (!isAvailable(ship)) {
-        const rem = ship.dateProchaineAction
-            ? Math.ceil((new Date(ship.dateProchaineAction) - Date.now()) / 1000)
-            : 0;
-        log(ship.nom, `En cooldown (encore ${rem}s) — dateProchaineAction=${ship.dateProchaineAction}`);
-        return;
-    }
-
     const id = ship.idVaisseau;
     const sx = ship.positionX;
     const sy = ship.positionY;
@@ -270,7 +287,7 @@ async function tickShip(ship) {
     }
 
     if (!shipState.has(id)) {
-        shipState.set(id, { phase: Phase.SEARCH, target: null, lastAttackTime: null, hpBeforeAttack: null, repairTarget: null });
+        shipState.set(id, { phase: Phase.SEARCH, target: null, lastAttackTime: null, hpBeforeAttack: null });
     }
     const ss = shipState.get(id);
 
@@ -330,7 +347,7 @@ async function tickShip(ship) {
             }
             log(ship.nom, `MOVE : (${sx},${sy}) → (${step.x},${step.y}) [cible (${ss.target.x},${ss.target.y})]`);
             try {
-                await doAction(state.teamId, id, "DEPLACEMENT", step.x, step.y);
+                await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", step.x, step.y);
                 log(ship.nom, `✓ Déplacement vers (${step.x},${step.y})`);
             } catch (e) {
                 log(ship.nom, `✗ Erreur déplacement : ${e.message}`);
@@ -347,10 +364,12 @@ async function tickShip(ship) {
             }
 
             const cached = planetCache.get(ss.target.key);
+            // Immunité : HP inchangé après attaque → incrémenter stuckCount
             if (ss.hpBeforeAttack !== null && ss.target.hp >= ss.hpBeforeAttack) {
                 if (cached) cached.stuckCount = (cached.stuckCount || 0) + 1;
                 if ((cached?.stuckCount ?? 0) >= STUCK_THRESHOLD) {
-                    log(ship.nom, `Planète ${ss.target.key} immunisée, ignorée.`);
+                    log(ship.nom, `Planète ${ss.target.key} immunisée (HP inchangé x${STUCK_THRESHOLD}), mise en cache.`);
+                    if (cached) cached.immune = true;
                     abandonTarget(id, ss, true);
                     return;
                 }
@@ -361,7 +380,7 @@ async function tickShip(ship) {
             ss.hpBeforeAttack = ss.target.hp;
             log(ship.nom, `⚔ Attaque (${ss.target.x},${ss.target.y}) HP=${ss.hpBeforeAttack}`);
             try {
-                await doAction(state.teamId, id, "ATTAQUER", ss.target.x, ss.target.y);
+                await doActionWithCooldown(state.teamId, id, "ATTAQUER", ss.target.x, ss.target.y);
                 ss.lastAttackTime = Date.now();
                 await sleep(500);
                 await scanArea(ss.target.x - 1, ss.target.y - 1, ss.target.x + 1, ss.target.y + 1);
@@ -381,10 +400,11 @@ async function tickShip(ship) {
             if (!ss.target) { ss.phase = Phase.SEARCH; return; }
             if (!ss.lastAttackTime) { ss.phase = Phase.CONQUER; return; }
             const elapsed = Date.now() - ss.lastAttackTime;
-            if (elapsed >= CONQUER_DELAY_MS) {
+            const conquerDelay = 3 * 60_000;
+            if (elapsed >= conquerDelay) {
                 ss.phase = Phase.CONQUER;
             } else {
-                const rem = Math.ceil((CONQUER_DELAY_MS - elapsed) / 1000);
+                const rem = Math.ceil((conquerDelay - elapsed) / 1000);
                 log(ship.nom, `⏳ Conquête dans ${Math.floor(rem / 60)}m${rem % 60}s`);
             }
             break;
@@ -398,7 +418,7 @@ async function tickShip(ship) {
             }
             log(ship.nom, `★ Conquête de (${ss.target.x},${ss.target.y})`);
             try {
-                await doAction(state.teamId, id, "CONQUERIR", ss.target.x, ss.target.y);
+                await doActionWithCooldown(state.teamId, id, "CONQUERIR", ss.target.x, ss.target.y);
                 log(ship.nom, `✓ Planète conquise !`);
                 notify(`[Bot] ${ship.nom} a conquis une planète !`, "success");
                 const cached = planetCache.get(ss.target.key);
@@ -412,37 +432,7 @@ async function tickShip(ship) {
             break;
         }
 
-        case Phase.REPAIR: {
-            const rt = ss.repairTarget;
-            if (!rt) { ss.phase = Phase.SEARCH; return; }
-            log(ship.nom, `🔧 Réparation de ${rt.nom} en (${rt.x},${rt.y})`);
-            if (isAdjacent(sx, sy, rt.x, rt.y)) {
-                try {
-                    await doAction(state.teamId, id, "REPARER", rt.x, rt.y);
-                    log(ship.nom, `✓ Réparation envoyée`);
-                    notify(`[Bot] ${ship.nom} répare un allié !`, "info");
-                    ss.repairTarget = null;
-                    ss.phase = Phase.SEARCH;
-                } catch (e) {
-                    log(ship.nom, `✗ Erreur réparation : ${e.message}`);
-                }
-            } else {
-                const step = findNextStep(sx, sy, rt.x, rt.y);
-                if (!step) {
-                    log(ship.nom, `Impossible d'atteindre le vaisseau à réparer`);
-                    ss.repairTarget = null;
-                    ss.phase = Phase.SEARCH;
-                    return;
-                }
-                try {
-                    await doAction(state.teamId, id, "DEPLACEMENT", step.x, step.y);
-                    log(ship.nom, `→ (${step.x},${step.y}) [vers réparation]`);
-                } catch (e) {
-                    log(ship.nom, `✗ Erreur déplacement : ${e.message}`);
-                }
-            }
-            break;
-        }
+
     }
 }
 
@@ -461,43 +451,10 @@ async function botTick() {
         }
         log("BOT", `${ships.length} vaisseau(x) trouvé(s)`);
 
-        // Mémoriser la position de chaque vaisseau vivant
-        for (const ship of ships) {
-            if (ship.positionX !== undefined && (ship.pointDeVie ?? 1) > 0) {
-                lastKnownPos.set(ship.idVaisseau, { x: ship.positionX, y: ship.positionY });
-            }
-        }
-
-        // Détecter les vaisseaux détruits et assigner un réparateur
-        const brokenShips = ships.filter(s => (s.pointDeVie ?? 1) === 0);
+        // Traiter uniquement les vaisseaux vivants — les détruits sont ignorés
         const activeShips = ships.filter(s => (s.pointDeVie ?? 1) > 0);
-        for (const broken of brokenShips) {
-            const alreadyAssigned = activeShips.some(s => {
-                const ss = shipState.get(s.idVaisseau);
-                return ss?.phase === Phase.REPAIR && ss?.repairTarget?.id === broken.idVaisseau;
-            });
-            if (alreadyAssigned) continue;
-            // Choisir le vaisseau actif le plus proche, sauf s'il attend pour conquérir
-            const repairer = activeShips
-                .filter(s => shipState.get(s.idVaisseau)?.phase !== Phase.WAIT_CONQUER)
-                .sort((a, b) =>
-                    chebyshevDist(a.positionX, a.positionY, broken.positionX, broken.positionY) -
-                    chebyshevDist(b.positionX, b.positionY, broken.positionX, broken.positionY)
-                )[0];
-            if (repairer) {
-                const ss = shipState.get(repairer.idVaisseau) ?? { phase: Phase.SEARCH, target: null, lastAttackTime: null, hpBeforeAttack: null, repairTarget: null };
-                if (ss.target) releaseClaim(repairer.idVaisseau, ss.target.key);
-                ss.target = null;
-                ss.hpBeforeAttack = null;
-                ss.phase = Phase.REPAIR;
-                ss.repairTarget = { x: broken.positionX, y: broken.positionY, id: broken.idVaisseau, nom: broken.nom };
-                shipState.set(repairer.idVaisseau, ss);
-                log(repairer.nom, `Assigné à la réparation de ${broken.nom} en (${broken.positionX},${broken.positionY})`);
-                notify(`[Bot] ${repairer.nom} part réparer ${broken.nom}`, "info");
-            }
-        }
 
-        for (const ship of ships) {
+        for (const ship of activeShips) {
             await tickShip(ship);
         }
     } catch (e) {
