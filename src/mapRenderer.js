@@ -39,17 +39,36 @@ let selectedShipId = null;
 let selectedPlanetId = null;
 let selectedCellKey = null;
 
-export function getTeamColor(teamId) {
+function normalizeTeamId(teamId) {
   if (!teamId) {
+    return null;
+  }
+
+  if (typeof teamId === "string") {
+    return teamId;
+  }
+
+  return teamId.idEquipe || teamId.teamId || teamId.id || null;
+}
+
+function blendHex(baseHex, targetHex, factor) {
+  const base = new THREE.Color(baseHex);
+  const target = new THREE.Color(targetHex);
+  return base.lerp(target, factor).getHex();
+}
+
+export function getTeamColor(teamId) {
+  const normalizedTeamId = normalizeTeamId(teamId);
+  if (!normalizedTeamId) {
     return 0x2d415a;
   }
 
-  if (teamId === state.teamId) {
+  if (normalizedTeamId === state.teamId) {
     return 0x57d0ff;
   }
 
   let hash = 0;
-  for (const char of teamId) {
+  for (const char of normalizedTeamId) {
     hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   }
 
@@ -130,7 +149,7 @@ function updateCellTile(group, cell) {
     return;
   }
 
-  const ownerId = cell.proprietaire?.idEquipe;
+  const ownerId = normalizeTeamId(cell.proprietaire);
   const color = ownerId ? getTeamColor(ownerId) : 0x0a1528;
   tile.material.color.setHex(color);
   tile.material.opacity = ownerId ? 0.34 : 0.18;
@@ -169,12 +188,16 @@ async function buildPlanet(cell) {
   const override = TYPE_OVERRIDES[type];
   const palette = override || BIOME_COLORS[biome] || { color: 0x6c7b8d, emissive: 0x13202f };
   const radius = override?.radius || (type === "GAZEUSE" ? 0.62 : 0.48);
+  const ownerId = normalizeTeamId(cell.proprietaire) || normalizeTeamId(planet.proprietaire);
+  const ownerColor = ownerId ? getTeamColor(ownerId) : null;
+  const surfaceColor = ownerColor ? blendHex(palette.color, ownerColor, 0.82) : palette.color;
+  const emissiveColor = ownerColor ? blendHex(palette.emissive, ownerColor, 0.4) : palette.emissive;
 
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 28, 18),
     new THREE.MeshPhongMaterial({
-      color: palette.color,
-      emissive: palette.emissive,
+      color: surfaceColor,
+      emissive: emissiveColor,
       emissiveIntensity: 0.38,
       shininess: type === "GAZEUSE" ? 36 : 18
     })
@@ -200,7 +223,7 @@ async function buildPlanet(cell) {
     const atmosphere = new THREE.Mesh(
       new THREE.SphereGeometry(radius * 1.08, 22, 16),
       new THREE.MeshLambertMaterial({
-        color: palette.color,
+        color: ownerColor ? blendHex(palette.color, ownerColor, 0.86) : palette.color,
         transparent: true,
         opacity: 0.16,
         side: THREE.BackSide
@@ -217,8 +240,7 @@ async function buildPlanet(cell) {
     addRing(group, radius * 1.28, radius * 1.9, 0x8f6eff, 0.72, 0.3);
   }
 
-  if (cell.proprietaire?.idEquipe) {
-    const ownerColor = getTeamColor(cell.proprietaire.idEquipe);
+  if (ownerColor) {
     addRing(group, radius * 1.12, radius * 1.32, ownerColor, 0.6, 0.02);
 
     const light = new THREE.PointLight(ownerColor, 0.7, 3.4);

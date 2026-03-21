@@ -14,12 +14,17 @@ export function getTeamIdFromToken(token) {
 }
 
 async function apiFetch(path, options = {}) {
+  const headers = {
+    ...options.headers
+  };
+
+  if (options.body !== undefined && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
   const response = await fetch(path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers
-    }
+    headers
   });
 
   if (!response.ok) {

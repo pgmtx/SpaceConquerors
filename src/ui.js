@@ -31,6 +31,10 @@ function getResource(team, resourceName) {
   return (team?.ressources || []).find((entry) => entry.ressource?.nom === resourceName)?.quantite ?? 0;
 }
 
+function getGold(team) {
+  return getResource(team, "CREDIT");
+}
+
 function isShipAvailable(ship) {
   if (!ship?.dateProchaineAction) {
     return true;
@@ -74,17 +78,18 @@ function getTeamById(teamId) {
 }
 
 function getOwnershipDetails(ownerId) {
-  if (!ownerId) {
+  const normalizedOwnerId = normalizeTeamId(ownerId);
+  if (!normalizedOwnerId) {
     return {
       ownerName: "Aucun propriétaire"
     };
   }
 
-  const team = getTeamById(ownerId);
+  const team = getTeamById(normalizedOwnerId);
   return {
-    ownerName: ownerId === state.teamId
+    ownerName: normalizedOwnerId === state.teamId
       ? `${state.teamName || team?.nom || "Votre équipe"} (vous)`
-      : team?.nom || `Équipe ${ownerId.slice(0, 8)}`
+      : team?.nom || `Équipe ${normalizedOwnerId.slice(0, 8)}`
   };
 }
 
@@ -117,7 +122,7 @@ export function updateCoords(x, y) {
 
 export function updateHUD(team) {
   document.getElementById("res-minerai").textContent = fmt(getResource(team, "MINERAI"));
-  document.getElementById("res-credits").textContent = fmt(getResource(team, "CREDIT"));
+  document.getElementById("res-credits").textContent = fmt(getGold(team));
   document.getElementById("res-ships").textContent = fmt(getResource(team, "VAISSEAU"));
   document.getElementById("team-score-val").textContent = fmt(getResource(team, "POINT"));
 }
@@ -125,6 +130,17 @@ export function updateHUD(team) {
 export function updateLeaderboard(teams) {
   const list = document.getElementById("leaderboard-list");
   list.innerHTML = "";
+
+  const header = document.createElement("div");
+  header.className = "lb-row lb-head";
+  header.innerHTML = `
+    <span class="lb-rank">#</span>
+    <span class="lb-color"></span>
+    <span class="lb-name">Equipe</span>
+    <span class="lb-gold" title="Gold">Gold</span>
+    <span class="lb-pts">Pts</span>
+  `;
+  list.appendChild(header);
 
   [...teams]
     .sort((left, right) => getResource(right, "POINT") - getResource(left, "POINT"))
@@ -136,6 +152,7 @@ export function updateLeaderboard(teams) {
         <span class="lb-rank">${index + 1}</span>
         <span class="lb-color" style="background:#${getTeamColor(team.idEquipe).toString(16).padStart(6, "0")}"></span>
         <span class="lb-name" title="${team.nom}">${team.nom}</span>
+        <span class="lb-gold" title="Gold">${fmt(getGold(team))}</span>
         <span class="lb-pts">${fmt(getResource(team, "POINT"))}</span>
       `;
       list.appendChild(row);
@@ -553,74 +570,298 @@ export async function executePendingAction(coordX, coordY) {
   }
 }
 
+function normalizeOfferStatus(status) {
+  return String(status || "").trim().toUpperCase();
+}
+
+function isOfferOpen(status) {
+  const normalizedStatus = normalizeOfferStatus(status);
+  return normalizedStatus === "OUVERTE" || normalizedStatus === "DISPONIBLE";
+}
+
+function getOfferStatusLabel(status) {
+  const normalizedStatus = normalizeOfferStatus(status);
+
+  if (normalizedStatus === "OUVERTE" || normalizedStatus === "DISPONIBLE") {
+    return "OUVERTE";
+  }
+
+  if (normalizedStatus === "FERMEE" || normalizedStatus === "VENDU") {
+    return "FERMEE";
+  }
+
+  if (normalizedStatus === "ABANDON" || normalizedStatus === "ANNULE") {
+    return "ABANDON";
+  }
+
+  return normalizedStatus || "?";
+}
+
+function getOfferAvailability(offer) {
+  if (!offer?.dateDisponibilite) {
+    return {
+      isAvailable: true,
+      label: ""
+    };
+  }
+
+  const availableAt = new Date(offer.dateDisponibilite);
+  if (Number.isNaN(availableAt.getTime())) {
+    return {
+      isAvailable: true,
+      label: ""
+    };
+  }
+
+  return {
+    isAvailable: availableAt.getTime() <= Date.now(),
+    label: availableAt.toLocaleString("fr-FR", {
+      dateStyle: "short",
+      timeStyle: "short"
+    })
+  };
+}
+
+function getOfferDisplayName(offer) {
+  if (offer?.typeObjet === "PLAN") {
+    return offer.plan?.nom || offer.plan?.typeVaisseau?.classeVaisseau || offer.idObjet || "Plan";
+  }
+
+  return offer.module?.paramModule?.typeModule || offer.idObjet || "Module";
+}
+
+function getOfferGroupKey(offer) {
+  const sellerId = normalizeTeamId(offer?.idVendeur) || "unknown";
+  const itemType = String(offer?.typeObjet || "OBJET").trim().toUpperCase();
+  const itemSignature = itemType === "PLAN"
+    ? offer?.plan?.typeVaisseau?.id || offer?.plan?.nom || offer?.idObjet || "unknown"
+    : offer?.module?.paramModule?.id || offer?.module?.paramModule?.typeModule || offer?.idObjet || "unknown";
+
+  return `${sellerId}|${itemType}|${String(itemSignature).trim().toUpperCase()}`;
+}
+
+function isPreferredOffer(candidate, current) {
+  if (!current) {
+    return true;
+  }
+
+  const candidateOpen = isOfferOpen(candidate?.statut);
+  const currentOpen = isOfferOpen(current?.statut);
+  if (candidateOpen !== currentOpen) {
+    return candidateOpen;
+  }
+
+  const candidateAvailable = getOfferAvailability(candidate).isAvailable;
+  const currentAvailable = getOfferAvailability(current).isAvailable;
+  if (candidateAvailable !== currentAvailable) {
+    return candidateAvailable;
+  }
+
+  const candidatePrice = Number(candidate?.prix ?? Number.POSITIVE_INFINITY);
+  const currentPrice = Number(current?.prix ?? Number.POSITIVE_INFINITY);
+  if (candidatePrice !== currentPrice) {
+    return candidatePrice < currentPrice;
+  }
+
+  const candidateDate = new Date(candidate?.dateMiseEnVente || 0).getTime();
+  const currentDate = new Date(current?.dateMiseEnVente || 0).getTime();
+  return candidateDate < currentDate;
+}
+
+function dedupeMarketOffers(offers) {
+  const groups = new Map();
+
+  (offers || []).forEach((offer) => {
+    const key = getOfferGroupKey(offer);
+    const existing = groups.get(key);
+
+    if (!existing) {
+      groups.set(key, {
+        ...offer,
+        offerCount: 1
+      });
+      return;
+    }
+
+    const preferredOffer = isPreferredOffer(offer, existing) ? offer : existing;
+    groups.set(key, {
+      ...preferredOffer,
+      offerCount: existing.offerCount + 1
+    });
+  });
+
+  return [...groups.values()];
+}
+
+function getSellableModules(modules) {
+  return (modules || []).filter((module) => !module.idPlanete);
+}
+
+function updateMarketSummary(offers, modules, plans) {
+  const summary = document.getElementById("market-summary");
+  if (!summary) {
+    return;
+  }
+
+  const openOffers = (offers || []).filter((offer) => isOfferOpen(offer.statut));
+  const buyableOffers = openOffers.filter((offer) => {
+    const sellerId = normalizeTeamId(offer.idVendeur);
+    return sellerId !== state.teamId && getOfferAvailability(offer).isAvailable;
+  });
+
+  summary.innerHTML = `
+    <div class="market-summary-item">
+      <span class="market-summary-label">Votre gold</span>
+      <strong>${fmt(getGold(state.myTeam))}</strong>
+    </div>
+    <div class="market-summary-item">
+      <span class="market-summary-label">Offres ouvertes</span>
+      <strong>${fmt(openOffers.length)}</strong>
+    </div>
+    <div class="market-summary-item">
+      <span class="market-summary-label">Achetables</span>
+      <strong>${fmt(buyableOffers.length)}</strong>
+    </div>
+    <div class="market-summary-item">
+      <span class="market-summary-label">Modules a vendre</span>
+      <strong>${fmt(getSellableModules(modules).length)}</strong>
+    </div>
+    <div class="market-summary-item">
+      <span class="market-summary-label">Plans a vendre</span>
+      <strong>${fmt((plans || []).length)}</strong>
+    </div>
+  `;
+}
+
+function updateSellFormState(type, modules, plans) {
+  const helper = document.getElementById("sell-helper");
+  const confirmButton = document.getElementById("sell-confirm-btn");
+  if (!helper || !confirmButton) {
+    return;
+  }
+
+  const moduleCount = getSellableModules(modules).length;
+  const planCount = (plans || []).length;
+  const hasItems = type === "PLAN" ? planCount > 0 : moduleCount > 0;
+
+  confirmButton.disabled = !hasItems;
+  helper.textContent = hasItems
+    ? ""
+    : type === "PLAN"
+      ? "Aucun plan disponible a mettre en vente."
+      : "Aucun module libre disponible a mettre en vente.";
+}
+
 export async function openMarket() {
   const modal = document.getElementById("market-modal");
   modal.classList.remove("hidden");
 
   const loading = document.getElementById("market-loading");
   const list = document.getElementById("market-list");
+  const summary = document.getElementById("market-summary");
   const typeSelect = document.getElementById("sell-object-type");
   const moduleGroup = document.getElementById("sell-module-group");
   const planGroup = document.getElementById("sell-plan-group");
   const moduleSelect = document.getElementById("sell-module-select");
   const planSelect = document.getElementById("sell-plan-select");
+  const sellHelper = document.getElementById("sell-helper");
+  const sellButton = document.getElementById("sell-confirm-btn");
 
   loading.style.display = "block";
   list.innerHTML = "";
+  if (summary) {
+    summary.innerHTML = "";
+  }
+  if (sellHelper) {
+    sellHelper.textContent = "";
+  }
   moduleSelect.innerHTML = `<option value="">-- Sélectionner un module --</option>`;
   planSelect.innerHTML = `<option value="">-- Sélectionner un plan --</option>`;
 
-  (state.myTeam?.modules || [])
-    .filter((module) => !module.idPlanete)
-    .forEach((module) => {
-      const option = document.createElement("option");
-      option.value = module.id;
-      option.textContent = module.paramModule?.typeModule || module.id;
-      moduleSelect.appendChild(option);
-    });
-
-  (state.myPlans || []).forEach((plan) => {
-    const option = document.createElement("option");
-    option.value = plan.id;
-    option.textContent = plan.nom || plan.typeVaisseau?.classeVaisseau || plan.id;
-    planSelect.appendChild(option);
-  });
+  let currentModules = [];
+  let currentPlans = [];
 
   const toggleSellFields = () => {
     const isPlan = typeSelect.value === "PLAN";
     moduleGroup.style.display = isPlan ? "none" : "flex";
     planGroup.style.display = isPlan ? "flex" : "none";
+    updateSellFormState(typeSelect.value, currentModules, currentPlans);
   };
 
   typeSelect.onchange = toggleSellFields;
   toggleSellFields();
 
   try {
-    const offers = await getMarketOffers();
+    const [offers, modules, plans] = await Promise.all([
+      getMarketOffers(),
+      getModules(state.teamId),
+      getPlans(state.teamId)
+    ]);
+    const visibleOffers = dedupeMarketOffers(offers);
+
+    state.myTeam = state.myTeam || { ressources: [], modules: [] };
+    currentModules = modules || [];
+    currentPlans = plans || [];
+    state.myTeam.modules = currentModules;
+    state.myPlans = currentPlans;
+    updateMarketSummary(visibleOffers, currentModules, currentPlans);
+
+    getSellableModules(state.myTeam.modules)
+      .forEach((module) => {
+        const option = document.createElement("option");
+        option.value = module.id;
+        option.textContent = module.paramModule?.typeModule || module.id;
+        moduleSelect.appendChild(option);
+      });
+
+    (state.myPlans || []).forEach((plan) => {
+      const option = document.createElement("option");
+      option.value = plan.id;
+      option.textContent = plan.nom || plan.typeVaisseau?.classeVaisseau || plan.id;
+      planSelect.appendChild(option);
+    });
+
+    updateSellFormState(typeSelect.value, currentModules, currentPlans);
+
     loading.style.display = "none";
 
-    if (!offers?.length) {
+    if (!visibleOffers.length) {
       list.innerHTML = `<div class="helper-text">Aucune offre visible pour le moment.</div>`;
     } else {
-      offers.forEach((offer) => {
-        const isOwnOffer = offer.idVendeur === state.teamId;
-        const offerLabel = offer.typeObjet === "PLAN"
-          ? `PLAN · ${offer.plan?.nom || offer.plan?.typeVaisseau?.classeVaisseau || offer.idObjet}`
-          : `MODULE · ${offer.module?.paramModule?.typeModule || offer.idObjet}`;
+      [...visibleOffers]
+        .sort((left, right) => {
+          const leftOpen = isOfferOpen(left.statut) ? 1 : 0;
+          const rightOpen = isOfferOpen(right.statut) ? 1 : 0;
+          if (leftOpen !== rightOpen) {
+            return rightOpen - leftOpen;
+          }
+
+          return (left.prix ?? 0) - (right.prix ?? 0);
+        })
+        .forEach((offer) => {
+        const sellerId = normalizeTeamId(offer.idVendeur);
+        const sellerTeam = getTeamById(sellerId);
+        const isOwnOffer = sellerId === state.teamId;
+        const offerStatus = normalizeOfferStatus(offer.statut);
+        const isOpen = isOfferOpen(offerStatus);
+        const availability = getOfferAvailability(offer);
+        const offerLabel = `${offer.typeObjet === "PLAN" ? "PLAN" : "MODULE"} · ${getOfferDisplayName(offer)}`;
+        const quantityLabel = offer.offerCount > 1 ? `${offer.offerCount} exemplaires` : "1 exemplaire";
 
         const row = document.createElement("div");
         row.className = "market-offer";
         row.innerHTML = `
           <span class="offer-type">${offerLabel}</span>
-          <span class="offer-seller">${isOwnOffer ? "VOUS" : (offer.idVendeur || "").slice(0, 8)}</span>
+          <span class="offer-seller">${isOwnOffer ? "VOUS" : (sellerTeam?.nom || (sellerId || "").slice(0, 8))}</span>
           <span class="offer-price">${fmt(offer.prix)} cr</span>
-          <span class="offer-status ${offer.statut || ""}">${offer.statut || "?"}</span>
+          <span class="offer-status ${offerStatus}">${getOfferStatusLabel(offerStatus)}</span>
+          <span class="offer-meta">${quantityLabel}${availability.label ? ` · Disponible ${availability.label}` : " · Disponible maintenant"}</span>
         `;
 
-        if (!isOwnOffer && offer.statut === "DISPONIBLE") {
+        if (!isOwnOffer && isOpen && availability.isAvailable) {
           const button = document.createElement("button");
           button.className = "btn-buy";
-          button.textContent = "Acheter";
+          button.textContent = offer.offerCount > 1 ? "Acheter 1" : "Acheter";
           button.addEventListener("click", async () => {
             button.disabled = true;
             try {
@@ -636,10 +877,18 @@ export async function openMarket() {
           row.appendChild(button);
         }
 
-        if (isOwnOffer && offer.statut === "DISPONIBLE") {
+        if (!isOwnOffer && isOpen && !availability.isAvailable) {
           const button = document.createElement("button");
           button.className = "btn-buy";
-          button.textContent = "Annuler";
+          button.textContent = "Bientot";
+          button.disabled = true;
+          row.appendChild(button);
+        }
+
+        if (isOwnOffer && isOpen) {
+          const button = document.createElement("button");
+          button.className = "btn-buy";
+          button.textContent = offer.offerCount > 1 ? "Annuler 1" : "Annuler";
           button.style.borderColor = "rgba(255, 102, 127, 0.38)";
           button.style.color = "#ff667f";
           button.addEventListener("click", async () => {
@@ -658,16 +907,19 @@ export async function openMarket() {
         }
 
         list.appendChild(row);
-      });
+        });
     }
   } catch (error) {
     loading.style.display = "none";
+    if (summary) {
+      summary.innerHTML = "";
+    }
     list.innerHTML = `<div class="helper-text">${error.message}</div>`;
   }
 
-  const sellButton = document.getElementById("sell-confirm-btn");
   const replacement = sellButton.cloneNode(true);
   sellButton.parentNode.replaceChild(replacement, sellButton);
+  updateSellFormState(typeSelect.value, currentModules, currentPlans);
 
   replacement.addEventListener("click", async () => {
     const price = Number.parseInt(document.getElementById("sell-price-input").value, 10);

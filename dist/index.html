@@ -495,6 +495,20 @@
       background: rgba(24, 55, 99, 0.26);
     }
 
+    .lb-row.lb-head {
+      background: transparent;
+      padding-bottom: 7px;
+      margin-bottom: 3px;
+      border-bottom: 1px solid rgba(51, 100, 159, 0.25);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .lb-row.lb-head:hover {
+      background: transparent;
+    }
+
     .lb-row.my-team {
       background: rgba(87, 208, 255, 0.08);
       outline: 1px solid rgba(87, 208, 255, 0.18);
@@ -528,6 +542,14 @@
       color: var(--accent);
       font-family: var(--font-display);
       flex-shrink: 0;
+    }
+
+    .lb-gold {
+      color: var(--gold);
+      font-family: var(--font-display);
+      flex-shrink: 0;
+      min-width: 42px;
+      text-align: right;
     }
 
     #crosshair-indicator {
@@ -699,6 +721,34 @@
       font-size: 11px;
     }
 
+    #market-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 8px;
+    }
+
+    .market-summary-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 12px;
+      background: rgba(8, 20, 41, 0.72);
+      border: 1px solid rgba(65, 124, 188, 0.24);
+    }
+
+    .market-summary-label {
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .market-summary-item strong {
+      color: var(--gold);
+      font-family: var(--font-display);
+      font-size: 15px;
+    }
+
     #market-list,
     #builder-list {
       display: flex;
@@ -732,6 +782,12 @@
       font-size: 11px;
     }
 
+    .offer-meta {
+      color: var(--muted);
+      font-size: 10px;
+      flex-basis: 100%;
+    }
+
     .offer-price {
       color: var(--gold);
       font-family: var(--font-display);
@@ -742,11 +798,23 @@
       color: var(--good);
     }
 
+    .offer-status.OUVERTE {
+      color: var(--good);
+    }
+
     .offer-status.VENDU {
       color: var(--danger);
     }
 
+    .offer-status.FERMEE {
+      color: var(--danger);
+    }
+
     .offer-status.ANNULE {
+      color: var(--gold);
+    }
+
+    .offer-status.ABANDON {
       color: var(--gold);
     }
 
@@ -785,6 +853,10 @@
 
     #sell-form .full {
       grid-column: 1 / -1;
+    }
+
+    #sell-helper:empty {
+      display: none;
     }
 
     #sell-module-select,
@@ -970,7 +1042,7 @@
       }
     }
   </style>
-  <script type="module" crossorigin src="/assets/index-cSsZ1kwV.js"></script>
+  <script type="module" crossorigin src="/assets/index-DOtjNgxp.js"></script>
 </head>
 <body>
   <div id="loading">
@@ -985,9 +1057,9 @@
   <div id="hud-top">
     <span id="coords-display">[ X:0 Y:0 ]</span>
     <div id="hud-resources">
-      <div class="res-chip"><span>⛏</span><span class="res-val" id="res-minerai">0</span></div>
-      <div class="res-chip"><span>💰</span><span class="res-val" id="res-credits">0</span></div>
-      <div class="res-chip"><span>🚀</span><span class="res-val" id="res-ships">0</span></div>
+      <div class="res-chip" title="Minerai"><span>⛏</span><span class="res-val" id="res-minerai">0</span></div>
+      <div class="res-chip" title="Gold"><span>💰</span><span>Gold</span><span class="res-val" id="res-credits">0</span></div>
+      <div class="res-chip" title="Vaisseaux"><span>🚀</span><span class="res-val" id="res-ships">0</span></div>
     </div>
     <div id="hud-score">⭐ <span id="team-score-val">0</span> pts</div>
     <div id="hud-buttons">
@@ -1064,6 +1136,7 @@
       </div>
       <div class="modal-body">
         <div id="market-loading">Chargement...</div>
+        <div id="market-summary"></div>
         <div id="market-list"></div>
 
         <div id="sell-form">
@@ -1091,6 +1164,7 @@
               <option value="">-- Sélectionner un plan --</option>
             </select>
           </label>
+          <div class="helper-text full" id="sell-helper"></div>
           <div class="full">
             <button class="modal-btn" id="sell-confirm-btn">Mettre en vente</button>
           </div>
