@@ -6,7 +6,7 @@ import {
   updateTeamHUD, updateLeaderboard, showShipInfo, showPlanetInfo,
   closeInfoPanel, initMinimap, drawMinimap, executePendingAction,
 } from './ui.js'
-import { getTeamIdFromToken, getMap, getAllTeams } from './api.js'
+import { getTeamIdFromToken, getMap, getAllTeams, getShips } from './api.js'
 import { preloadAllModels } from './models.js'
 import { state } from './state.js'
 
@@ -84,13 +84,18 @@ async function refreshMap() {
   }
 }
 
-// getAllTeams() contient déjà toutes les données (ressources, vaisseaux, planètes)
-// → pas besoin d'appeler getTeam() séparément
 async function refreshAllTeams() {
   try {
-    const teams = await getAllTeams()
+    const [teams, myShips] = await Promise.all([
+      getAllTeams(),
+      getShips(state.teamId),
+    ])
     state.allTeams = teams || []
     state.myTeam = state.allTeams.find(t => t.idEquipe === state.teamId) || null
+    // Merge position data from /vaisseaux endpoint (absent dans /equipes)
+    if (state.myTeam && myShips) {
+      state.myTeam.vaisseaux = myShips
+    }
     updateTeamHUD(state.myTeam)
     updateLeaderboard(state.allTeams)
   } catch (e) {
