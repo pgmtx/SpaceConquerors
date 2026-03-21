@@ -83,7 +83,7 @@ export async function renderMap(cells) {
 
 			// Planet
 			if (cell.planete) {
-				buildPlanet(group, cell.planete, cell.proprietaire?.idEquipe);
+				buildPlanet(group, cell.planete, cell.proprietaire?.idEquipe, cell.coord_x, cell.coord_y);
 			}
 
 			scene.add(group);
@@ -142,7 +142,7 @@ function updateCellTile(group, cell) {
 }
 
 // ── Planet ────────────────────────────────────────────────────
-function buildPlanet(group, planete, ownerId) {
+function buildPlanet(group, planete, ownerId, coord_x, coord_y) {
 	const model = planete.modelePlanete;
 	const typePlanete = model?.typePlanete;
 	const biome = model?.biome;
@@ -192,7 +192,7 @@ function buildPlanet(group, planete, ownerId) {
 	sphere.position.y = radius;
 	sphere.castShadow = true;
 	sphere.userData.isPlanet = true;
-	sphere.userData.planete = planete;
+	sphere.userData.planete = { ...planete, coord_x, coord_y };
 
 	// Owner glow ring around base
 	if (ownerId) {

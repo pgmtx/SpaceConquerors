@@ -1,6 +1,6 @@
 import { state } from "./state.js";
 import { getTeamColor } from "./mapRenderer.js";
-import { doAction, placeModule, removeModule } from "./api.js";
+import { doAction, placeModule, removeModule, getMap } from "./api.js";
 
 // ── Notifications ─────────────────────────────────────────────
 export function notify(msg, type = "info") {
@@ -189,10 +189,7 @@ export function refreshSelectedPlanet(mapCells) {
 	if (cell?.planete) showPlanetInfo(cell.planete);
 }
 
-export function showPlanetInfo(planete) {
-	if (!planete) return closeInfoPanel();
-	_lastPlanete = planete;
-
+function renderPlanetInfoHTML(planete) {
 	const biome = planete.modelePlanete?.biome || "--";
 	const type = planete.modelePlanete?.typePlanete || "--";
 	const hp = planete.pointDeVie ?? "?";
@@ -202,7 +199,6 @@ export function showPlanetInfo(planete) {
 	const hpColor = typeof hp === "number" && hp < 30 ? "bad" : "good";
 
 	document.getElementById("info-title").textContent = `🌍 ${planete.nom}`;
-
 	document.getElementById("info-col-1").innerHTML = `
     <div class="info-row"><span class="info-label">Type</span><span class="info-value">${type}</span></div>
     <div class="info-row"><span class="info-label">Biome</span><span class="info-value">${biome}</span></div>
@@ -213,7 +209,6 @@ export function showPlanetInfo(planete) {
     <div class="info-row"><span class="info-label">Slots</span><span class="info-value">${slots}</span></div>
     <div class="info-row"><span class="info-label">Modules</span><span class="info-value">${mods}</span></div>
   `;
-	// Modules panel (planètes qu'on possède)
 	const actionsPanel = document.getElementById("actions-panel");
 	const actionsButtons = document.getElementById("actions-buttons");
 	const isOurs =
@@ -227,7 +222,28 @@ export function showPlanetInfo(planete) {
 	} else {
 		actionsPanel.classList.remove("visible");
 	}
+}
+
+export function showPlanetInfo(planete) {
+	if (!planete) return closeInfoPanel();
+	_lastPlanete = planete;
+	renderPlanetInfoHTML(planete);
 	openInfoPanel();
+
+	// Async refresh HP from a live map fetch if coordinates are known
+	const cx = planete.coord_x;
+	const cy = planete.coord_y;
+	if (cx !== undefined && cy !== undefined) {
+		getMap(cx, cx, cy, cy).then((cells) => {
+			const cell = cells?.find(
+				(c) => c.coord_x === cx && c.coord_y === cy && c.planete,
+			);
+			if (cell?.planete && _lastPlanete?.idPlanete === cell.planete.idPlanete) {
+				_lastPlanete = { ..._lastPlanete, ...cell.planete };
+				renderPlanetInfoHTML(_lastPlanete);
+			}
+		}).catch(() => {});
+	}
 }
 
 function renderModulesPanel(container, planete) {
