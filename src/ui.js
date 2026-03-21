@@ -48,6 +48,33 @@ function ownerIdOfPlanet(planet) {
   return planet?.proprietaire?.idEquipe || planet?.proprietaire || null;
 }
 
+function getTeamById(teamId) {
+  if (!teamId) {
+    return null;
+  }
+
+  if (teamId === state.teamId) {
+    return state.myTeam || state.allTeams.find((team) => team.idEquipe === teamId) || null;
+  }
+
+  return state.allTeams.find((team) => team.idEquipe === teamId) || null;
+}
+
+function getOwnershipDetails(ownerId) {
+  if (!ownerId) {
+    return {
+      ownerName: "Aucun propriétaire"
+    };
+  }
+
+  const team = getTeamById(ownerId);
+  return {
+    ownerName: ownerId === state.teamId
+      ? `${state.teamName || team?.nom || "Votre équipe"} (vous)`
+      : team?.nom || `Équipe ${ownerId.slice(0, 8)}`
+  };
+}
+
 export function notify(message, type = "info") {
   const container = document.getElementById("notifications");
   const element = document.createElement("div");
@@ -168,6 +195,7 @@ export function showShipInfo(ship) {
   const hpRatio = maxHp > 0 ? currentHp / maxHp : 0;
   const isMine = ship.proprietaire === state.teamId;
   const available = isShipAvailable(ship);
+  const ownership = getOwnershipDetails(ship.proprietaire);
 
   setPortrait(
     "🚀",
@@ -181,6 +209,7 @@ export function showShipInfo(ship) {
     { key: "ATTAQUE", val: fmt(ship.type?.attaque) },
     { key: "CARGO", val: `${fmt(ship.mineraiTransporte ?? 0)} / ${fmt(ship.type?.capaciteTransport ?? 0)}` },
     { key: "POSITION", val: `(${fmt(ship.positionX)}, ${fmt(ship.positionY)})` },
+    { key: "ÉQUIPE", val: ownership.ownerName },
     { key: "STATUT", val: available ? "PRÊT" : "COOLDOWN", cls: available ? "good" : "warn" }
   ]);
 
@@ -269,6 +298,7 @@ export function showPlanetInfo(planet) {
   const hpRatio = Math.max(0, Math.min(1, hp / Math.max(hp, 100)));
   const ownerId = ownerIdOfPlanet(planet);
   const isMine = ownerId === state.teamId;
+  const ownership = getOwnershipDetails(ownerId);
 
   setPortrait(
     "🌍",
@@ -282,7 +312,7 @@ export function showPlanetInfo(planet) {
     { key: "MINERAI", val: fmt(planet.mineraiDisponible ?? 0) },
     { key: "SLOTS", val: `${modules.length} / ${fmt(planet.slotsConstruction ?? 0)}` },
     { key: "COORD", val: `(${fmt(planet.coord_x)}, ${fmt(planet.coord_y)})` },
-    { key: "PROPRIÉTAIRE", val: isMine ? "VOUS" : ownerId ? "ENNEMI / ALLIÉ" : "AUCUN" }
+    { key: "ÉQUIPE", val: ownership.ownerName }
   ]);
 
   if (!isMine) {
@@ -303,6 +333,28 @@ export function showPlanetInfo(planet) {
       action: () => openShipBuilder(planet)
     }
   ]);
+}
+
+export function showCellInfo(cell) {
+  if (!cell) {
+    return closeInfoPanel();
+  }
+
+  const ownerId = cell.proprietaire?.idEquipe || null;
+  const ownership = getOwnershipDetails(ownerId);
+  const content = cell.planete
+    ? `PlanÃ¨te ${cell.planete.nom || ""}`.trim()
+    : cell.vaisseau
+      ? `Vaisseau ${cell.vaisseau.nom || ""}`.trim()
+      : "Vide";
+
+  setPortrait("â—»", `Case ${cell.coord_x},${cell.coord_y}`, content, null);
+  setStats([
+    { key: "COORD", val: `(${fmt(cell.coord_x)}, ${fmt(cell.coord_y)})` },
+    { key: "Ã‰QUIPE", val: ownership.ownerName },
+    { key: "CONTENU", val: content }
+  ]);
+  buildCommandCard([]);
 }
 
 async function renderModulesInStats(planet) {
@@ -364,6 +416,7 @@ export function closeInfoPanel() {
   lastPlanetId = null;
   state.selectedShip = null;
   state.selectedPlanet = null;
+  state.selectedCell = null;
   clearPendingAction();
   setPortrait("◈", "---", "Aucune sélection", null);
   document.getElementById("stats-content").innerHTML = "";

@@ -36,6 +36,8 @@ const cellObjects = new Map();
 const shipObjects = new Map();
 
 let selectedShipId = null;
+let selectedPlanetId = null;
+let selectedCellKey = null;
 
 export function getTeamColor(teamId) {
   if (!teamId) {
@@ -59,6 +61,7 @@ export function clearMap() {
   shipObjects.forEach((mesh) => scene.remove(mesh));
   cellObjects.clear();
   shipObjects.clear();
+  selectedCellKey = null;
 }
 
 export async function renderMap(cells) {
@@ -181,6 +184,18 @@ async function buildPlanet(cell) {
   sphere.userData.isPlanet = true;
   sphere.userData.planete = planet;
 
+  const hitArea = new THREE.Mesh(
+    new THREE.SphereGeometry(radius * 1.9, 18, 12),
+    new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false
+    })
+  );
+  hitArea.position.y = radius;
+  hitArea.userData.isPlanetHitArea = true;
+  hitArea.userData.planete = planet;
+
   if (type === "GAZEUSE") {
     const atmosphere = new THREE.Mesh(
       new THREE.SphereGeometry(radius * 1.08, 22, 16),
@@ -214,6 +229,7 @@ async function buildPlanet(cell) {
   await buildModuleIndicators(group, planet.modules || [], radius);
 
   group.add(sphere);
+  group.add(hitArea);
   return group;
 }
 
@@ -331,7 +347,7 @@ export function getClickedObject(raycaster) {
   const planetMeshes = [];
   cellObjects.forEach(({ group }) => {
     group.traverse((child) => {
-      if (child.userData.isPlanet) {
+      if (child.userData.isPlanet || child.userData.isPlanetHitArea) {
         planetMeshes.push(child);
       }
     });
@@ -357,6 +373,56 @@ export function getClickedObject(raycaster) {
   }
 
   return null;
+}
+
+export function highlightPlanet(planetId, enabled) {
+  if (selectedPlanetId && selectedPlanetId !== planetId) {
+    const previous = findPlanetContainerById(selectedPlanetId);
+    if (previous) {
+      removePlanetSelectionRing(previous);
+    }
+  }
+
+  const planetContainer = findPlanetContainerById(planetId);
+  if (!planetContainer) {
+    return;
+  }
+
+  if (enabled) {
+    selectedPlanetId = planetId;
+    addPlanetSelectionRing(planetContainer);
+  } else {
+    if (selectedPlanetId === planetId) {
+      selectedPlanetId = null;
+    }
+    removePlanetSelectionRing(planetContainer);
+  }
+}
+
+export function highlightCell(coordX, coordY, enabled) {
+  const cellKey = `${coordX}_${coordY}`;
+
+  if (selectedCellKey && selectedCellKey !== cellKey) {
+    const previous = cellObjects.get(selectedCellKey);
+    if (previous) {
+      removeCellSelectionMarker(previous.group);
+    }
+  }
+
+  const entry = cellObjects.get(cellKey);
+  if (!entry) {
+    return;
+  }
+
+  if (enabled) {
+    selectedCellKey = cellKey;
+    addCellSelectionMarker(entry.group);
+  } else {
+    if (selectedCellKey === cellKey) {
+      selectedCellKey = null;
+    }
+    removeCellSelectionMarker(entry.group);
+  }
 }
 
 export function highlightShip(shipId, enabled) {
@@ -415,5 +481,74 @@ function removeSelectionRing(mesh) {
   const ring = mesh.children.find((child) => child.userData.isSelectionRing);
   if (ring) {
     mesh.remove(ring);
+  }
+}
+
+function findPlanetContainerById(planetId) {
+  if (!planetId) {
+    return null;
+  }
+
+  for (const { group } of cellObjects.values()) {
+    const planetContainer = group.children.find((child) => child.userData.isPlanetContainer);
+    const planetMesh = planetContainer?.children.find((child) => child.userData.isPlanet);
+    if (planetMesh?.userData?.planete?.identifiant === planetId) {
+      return planetContainer;
+    }
+  }
+
+  return null;
+}
+
+function addPlanetSelectionRing(planetContainer) {
+  removePlanetSelectionRing(planetContainer);
+
+  const planetMesh = planetContainer.children.find((child) => child.userData.isPlanet);
+  const radius = planetMesh?.geometry?.parameters?.radius || 0.5;
+
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 1.38, radius * 1.58, 40),
+    new THREE.MeshBasicMaterial({
+      color: 0x57d0ff,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.9
+    })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.05;
+  ring.userData.isPlanetSelectionRing = true;
+  planetContainer.add(ring);
+}
+
+function removePlanetSelectionRing(planetContainer) {
+  const ring = planetContainer.children.find((child) => child.userData.isPlanetSelectionRing);
+  if (ring) {
+    planetContainer.remove(ring);
+  }
+}
+
+function addCellSelectionMarker(group) {
+  removeCellSelectionMarker(group);
+
+  const marker = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.08, 2.08),
+    new THREE.MeshBasicMaterial({
+      color: 0x57d0ff,
+      transparent: true,
+      opacity: 0.22,
+      side: THREE.DoubleSide
+    })
+  );
+  marker.rotation.x = -Math.PI / 2;
+  marker.position.y = 0.03;
+  marker.userData.isCellSelectionMarker = true;
+  group.add(marker);
+}
+
+function removeCellSelectionMarker(group) {
+  const marker = group.children.find((child) => child.userData.isCellSelectionMarker);
+  if (marker) {
+    group.remove(marker);
   }
 }

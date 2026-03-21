@@ -8,9 +8,9 @@ import {
   getShips,
   getTeamIdFromToken
 } from "./api.js";
-import { animateMap, getClickedObject, highlightShip, renderMap } from "./mapRenderer.js";
+import { animateMap, getClickedObject, highlightCell, highlightPlanet, highlightShip, renderMap } from "./mapRenderer.js";
 import { preloadAllModels } from "./models.js";
-import { camera, focusOnShip, focusOnWholeMap, initScene, panCameraTo, render } from "./scene.js";
+import { camera, focusOnShip, focusOnWholeMap, initScene, panCameraTo, render, renderer } from "./scene.js";
 import { state } from "./state.js";
 import {
   clearPendingAction,
@@ -23,6 +23,7 @@ import {
   openMarket,
   refreshSelectedPlanet,
   setLoading,
+  showCellInfo,
   showPlanetInfo,
   showShipInfo,
   updateCoords,
@@ -100,6 +101,9 @@ async function refreshMap() {
     state.mapCells = cells || [];
     updateMinimapData(state.mapCells);
     await renderMap(state.mapCells);
+    if (state.selectedCell) {
+      highlightCell(state.selectedCell.coord_x, state.selectedCell.coord_y, true);
+    }
     updateCoords(
       state.fullMapMode ? "GLOBAL" : state.viewX,
       state.fullMapMode ? "58x58" : state.viewY
@@ -201,6 +205,169 @@ function updateMinimapData(cells) {
       state.minimapPlanets[index] = payload;
     }
   });
+}
+
+function getCellFromRay(raycaster) {
+  const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const point = new THREE.Vector3();
+
+  if (!raycaster.ray.intersectPlane(plane, point)) {
+    return null;
+  }
+
+  const worldSize = state.mapWorldSize * 2;
+  if (point.x < 0 || point.z < 0 || point.x >= worldSize || point.z >= worldSize) {
+    return null;
+  }
+
+  const coordX = Math.floor(point.x / 2);
+  const coordY = Math.floor(point.z / 2);
+
+  return state.mapCells.find((cell) => cell.coord_x === coordX && cell.coord_y === coordY) || {
+    coord_x: coordX,
+    coord_y: coordY,
+    proprietaire: null,
+    planete: null,
+    vaisseau: null
+  };
+}
+
+function getSelectionFromCell(cell) {
+  if (!cell) {
+    return null;
+  }
+
+  if (cell.planete) {
+    return {
+      type: "planet",
+      data: {
+        ...cell.planete,
+        coord_x: cell.coord_x,
+        coord_y: cell.coord_y,
+        proprietaire: cell.proprietaire
+      }
+    };
+  }
+
+  if (cell.vaisseau) {
+    return {
+      type: "ship",
+      data: cell.vaisseau
+    };
+  }
+
+  return {
+    type: "cell",
+    data: cell
+  };
+}
+
+function clearCurrentSelection() {
+  if (state.selectedCell) {
+    highlightCell(state.selectedCell.coord_x, state.selectedCell.coord_y, false);
+  }
+  if (state.selectedShip?.idVaisseau) {
+    highlightShip(state.selectedShip.idVaisseau, false);
+  }
+  if (state.selectedPlanet?.identifiant) {
+    highlightPlanet(state.selectedPlanet.identifiant, false);
+  }
+}
+
+function selectCell(cell) {
+  clearCurrentSelection();
+  state.selectedCell = cell;
+  state.selectedPlanet = null;
+  state.selectedShip = null;
+  showCellInfo(cell);
+  highlightCell(cell.coord_x, cell.coord_y, true);
+}
+
+function selectShip(ship) {
+  clearCurrentSelection();
+  state.selectedCell = null;
+  state.selectedPlanet = null;
+  state.selectedShip = ship;
+  showShipInfo(ship);
+
+  if (ship?.idVaisseau) {
+    highlightShip(ship.idVaisseau, true);
+  }
+}
+
+function selectPlanet(planet) {
+  clearCurrentSelection();
+  state.selectedCell = null;
+  state.selectedShip = null;
+  state.selectedPlanet = planet;
+  showPlanetInfo(planet);
+
+  if (planet?.identifiant) {
+    highlightPlanet(planet.identifiant, true);
+  }
+}
+
+async function handlePrimaryMapClick(event, element, raycaster, mouse) {
+  const rect = element.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const clickedCell = getCellFromRay(raycaster);
+  const preciseHit = getClickedObject(raycaster);
+  const hit = clickedCell ? { type: "cell", data: clickedCell } : (
+    preciseHit?.type === "cell"
+      ? { type: "cell", data: preciseHit.data }
+      : preciseHit
+  );
+
+  if (state.pendingAction) {
+    let coordX;
+    let coordY;
+
+    if (clickedCell) {
+      coordX = clickedCell.coord_x;
+      coordY = clickedCell.coord_y;
+    } else if (hit?.type === "planet") {
+      coordX = hit.data.coord_x;
+      coordY = hit.data.coord_y;
+    } else if (hit?.type === "ship") {
+      coordX = hit.data.positionX;
+      coordY = hit.data.positionY;
+    }
+
+    if (coordX !== undefined && coordY !== undefined) {
+      const executed = await executePendingAction(coordX, coordY);
+      if (executed) {
+        await fullSync();
+      }
+      return;
+    }
+  }
+
+  if (!hit) {
+    clearCurrentSelection();
+    closeInfoPanel();
+    return;
+  }
+
+  if (hit.type === "cell") {
+    selectCell(hit.data);
+    return;
+  }
+
+  if (hit.type === "ship") {
+    selectShip(hit.data);
+    return;
+  }
+
+  if (hit.type === "planet") {
+    selectPlanet(hit.data);
+    return;
+  }
+
+  clearCurrentSelection();
+  closeInfoPanel();
 }
 
 function centerViewOnFleet() {
@@ -330,6 +497,7 @@ function registerInput() {
     keys[event.key] = true;
 
     if (event.key === "Escape") {
+      clearCurrentSelection();
       clearPendingAction();
       closeInfoPanel();
     }
@@ -346,60 +514,67 @@ function registerInput() {
 
   const raycaster = new THREE.Raycaster();
   const mouse = new THREE.Vector2();
+  const interactionState = {
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    moved: false
+  };
+  const clickThreshold = 6;
+  const interactionSurface = renderer?.domElement || document.getElementById("canvas-container");
 
-  document.getElementById("canvas-container").addEventListener("click", async (event) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
-
-    const hit = getClickedObject(raycaster);
-
-    if (state.pendingAction) {
-      let coordX;
-      let coordY;
-
-      if (hit?.type === "cell") {
-        coordX = hit.data.coord_x;
-        coordY = hit.data.coord_y;
-      } else if (hit?.type === "planet") {
-        coordX = hit.data.coord_x;
-        coordY = hit.data.coord_y;
-      } else if (hit?.type === "ship") {
-        coordX = hit.data.positionX;
-        coordY = hit.data.positionY;
-      }
-
-      if (coordX !== undefined && coordY !== undefined) {
-        const executed = await executePendingAction(coordX, coordY);
-        if (executed) {
-          await fullSync();
-        }
-        return;
-      }
-    }
-
-    if (!hit) {
-      closeInfoPanel();
+  const resetPointerState = (pointerId = null) => {
+    if (pointerId !== null && interactionState.pointerId !== pointerId) {
       return;
     }
 
-    if (hit.type === "ship") {
-      state.selectedShip = hit.data;
-      state.selectedPlanet = null;
-      showShipInfo(hit.data);
-      highlightShip(hit.data.idVaisseau, true);
+    interactionState.pointerId = null;
+    interactionState.startX = 0;
+    interactionState.startY = 0;
+    interactionState.moved = false;
+  };
+
+  interactionSurface.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
       return;
     }
 
-    if (hit.type === "planet") {
-      state.selectedPlanet = hit.data;
-      state.selectedShip = null;
-      showPlanetInfo(hit.data);
+    interactionState.pointerId = event.pointerId;
+    interactionState.startX = event.clientX;
+    interactionState.startY = event.clientY;
+    interactionState.moved = false;
+  });
+
+  interactionSurface.addEventListener("pointermove", (event) => {
+    if (event.pointerId !== interactionState.pointerId) {
       return;
     }
 
-    closeInfoPanel();
+    if (
+      Math.abs(event.clientX - interactionState.startX) > clickThreshold ||
+      Math.abs(event.clientY - interactionState.startY) > clickThreshold
+    ) {
+      interactionState.moved = true;
+    }
+  });
+
+  interactionSurface.addEventListener("pointercancel", (event) => {
+    resetPointerState(event.pointerId);
+  });
+
+  interactionSurface.addEventListener("pointerup", async (event) => {
+    if (event.button !== 0 || event.pointerId !== interactionState.pointerId) {
+      return;
+    }
+
+    const moved = interactionState.moved;
+    resetPointerState(event.pointerId);
+
+    if (moved) {
+      return;
+    }
+
+    await handlePrimaryMapClick(event, interactionSurface, raycaster, mouse);
   });
 }
 
@@ -412,14 +587,11 @@ function selectShipByIndex(index) {
 
   teamSelectIndex = ((index % ships.length) + ships.length) % ships.length;
   const ship = ships[teamSelectIndex];
-
-  state.selectedShip = ship;
-  state.selectedPlanet = null;
-  showShipInfo(ship);
-  highlightShip(ship.idVaisseau, true);
+  selectShip(ship);
 
   if (ship.positionX !== undefined && ship.positionY !== undefined) {
     if (state.fullMapMode) {
+      focusOnShip(ship.positionX, ship.positionY);
       return;
     }
 

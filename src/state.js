@@ -17,6 +17,7 @@ export const state = {
 
   selectedShip: null,
   selectedPlanet: null,
+  selectedCell: null,
 
   minimapPlanets: [],
   pendingAction: null,
