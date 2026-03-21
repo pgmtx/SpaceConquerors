@@ -512,12 +512,12 @@ async function botTick() {
             log("BOT", `Aucun vaisseau retourné par l'API`);
             return;
         }
-        log("BOT", `${ships.length} vaisseau(x) trouvé(s)`);
-
-        // Traiter les vaisseaux vivants non assignés au minage (ATTACK ou IDLE)
+        // Traiter uniquement les vaisseaux vivants assignés à ATTACK
         const activeShips = ships.filter(s =>
-            (s.pointDeVie ?? 1) > 0 && getRole(s.idVaisseau) !== Role.MINE
+            (s.pointDeVie ?? 1) > 0 && getRole(s.idVaisseau) === Role.ATTACK
         );
+        if (!activeShips.length) return;
+        log("BOT", `${activeShips.length} vaisseau(x) en ATTACK`);
 
         for (const ship of activeShips) {
             await tickShip(ship);

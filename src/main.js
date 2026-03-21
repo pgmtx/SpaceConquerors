@@ -395,7 +395,7 @@ function renderShipPanel(ships) {
 		for (const [label, r, cls] of [
 			["⚡", Role.ATTACK, "active-attack"],
 			["⛏", Role.MINE,   "active-mine"],
-			["○",  Role.IDLE,   ""],
+			["○",  Role.IDLE,   "active-idle"],
 		]) {
 			const btn = document.createElement("button");
 			btn.className = "role-btn" + (role === r ? ` ${cls}` : "");
