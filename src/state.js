@@ -23,6 +23,9 @@ export const state = {
   // Minimap data (full visible planets from multiple queries)
   minimapPlanets: [],
 
+  // Pending ship action (waiting for click target)
+  pendingAction: null,
+
   // Refresh control
   lastRefresh: 0,
   refreshInterval: 5000, // ms
