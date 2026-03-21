@@ -142,9 +142,9 @@ function buildGridPlane() {
   scene.add(plane)
 
   // Grid lines
-  const gridHelper = new THREE.GridHelper(200, 100, 0x0a1a2a, 0x0a1a2a)
+  const gridHelper = new THREE.GridHelper(200, 100, 0x1a4466, 0x1a4466)
   gridHelper.position.set(58, 0, 58)
-  gridHelper.material.opacity = 0.4
+  gridHelper.material.opacity = 0.7
   gridHelper.material.transparent = true
   scene.add(gridHelper)
 }
