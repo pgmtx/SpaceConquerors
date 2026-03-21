@@ -44,20 +44,33 @@ function createShipName(plan) {
   return `${base} ${Math.floor(100 + Math.random() * 900)}`;
 }
 
-function ownerIdOfPlanet(planet) {
-  return planet?.proprietaire?.idEquipe || planet?.proprietaire || null;
-}
-
-function getTeamById(teamId) {
+function normalizeTeamId(teamId) {
   if (!teamId) {
     return null;
   }
 
-  if (teamId === state.teamId) {
-    return state.myTeam || state.allTeams.find((team) => team.idEquipe === teamId) || null;
+  if (typeof teamId === "string") {
+    return teamId;
   }
 
-  return state.allTeams.find((team) => team.idEquipe === teamId) || null;
+  return teamId.idEquipe || teamId.teamId || teamId.id || null;
+}
+
+function ownerIdOfPlanet(planet) {
+  return normalizeTeamId(planet?.proprietaire);
+}
+
+function getTeamById(teamId) {
+  const normalizedTeamId = normalizeTeamId(teamId);
+  if (!normalizedTeamId) {
+    return null;
+  }
+
+  if (normalizedTeamId === state.teamId) {
+    return state.myTeam || state.allTeams.find((team) => team.idEquipe === normalizedTeamId) || null;
+  }
+
+  return state.allTeams.find((team) => team.idEquipe === normalizedTeamId) || null;
 }
 
 function getOwnershipDetails(ownerId) {

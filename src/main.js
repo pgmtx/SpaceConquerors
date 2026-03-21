@@ -8,7 +8,7 @@ import {
   getShips,
   getTeamIdFromToken
 } from "./api.js";
-import { animateMap, getClickedObject, highlightCell, highlightPlanet, highlightShip, renderMap } from "./mapRenderer.js";
+import { animateMap, highlightCell, highlightPlanet, highlightShip, renderMap } from "./mapRenderer.js";
 import { preloadAllModels } from "./models.js";
 import { camera, focusOnShip, focusOnWholeMap, initScene, panCameraTo, render, renderer } from "./scene.js";
 import { state } from "./state.js";
@@ -21,7 +21,6 @@ import {
   initMinimap,
   notify,
   openMarket,
-  refreshSelectedPlanet,
   setLoading,
   showCellInfo,
   showPlanetInfo,
@@ -101,15 +100,15 @@ async function refreshMap() {
     state.mapCells = cells || [];
     updateMinimapData(state.mapCells);
     await renderMap(state.mapCells);
-    if (state.selectedCell) {
-      highlightCell(state.selectedCell.coord_x, state.selectedCell.coord_y, true);
+    const selection = getSelectionFromState();
+    if (selection) {
+      applySelection(selection);
     }
     updateCoords(
       state.fullMapMode ? "GLOBAL" : state.viewX,
       state.fullMapMode ? "58x58" : state.viewY
     );
     drawMinimap(state.mapCells);
-    refreshSelectedPlanet(state.mapCells);
   } catch (error) {
     notify(`Erreur carte: ${error.message}`, "error");
   }
@@ -174,8 +173,7 @@ async function refreshAllTeams() {
     if (state.selectedShip?.idVaisseau) {
       const refreshedShip = state.myTeam.vaisseaux.find((ship) => ship.idVaisseau === state.selectedShip.idVaisseau);
       if (refreshedShip) {
-        state.selectedShip = refreshedShip;
-        showShipInfo(refreshedShip);
+        applySelection(buildSelectionForShip(refreshedShip));
       }
     }
   } catch (error) {
@@ -232,34 +230,251 @@ function getCellFromRay(raycaster) {
   };
 }
 
-function getSelectionFromCell(cell) {
+function createCellStub(coordX, coordY, overrides = {}) {
+  return {
+    coord_x: coordX ?? 0,
+    coord_y: coordY ?? 0,
+    proprietaire: null,
+    planete: null,
+    vaisseau: null,
+    ...overrides
+  };
+}
+
+function normalizeCell(cell) {
   if (!cell) {
     return null;
   }
 
-  if (cell.planete) {
-    return {
-      type: "planet",
-      data: {
-        ...cell.planete,
-        coord_x: cell.coord_x,
-        coord_y: cell.coord_y,
-        proprietaire: cell.proprietaire
-      }
-    };
+  return createCellStub(cell.coord_x, cell.coord_y, {
+    proprietaire: cell.proprietaire ?? null,
+    planete: cell.planete ?? null,
+    vaisseau: cell.vaisseau ?? null
+  });
+}
+
+function findCellByCoords(coordX, coordY) {
+  if (coordX === undefined || coordY === undefined) {
+    return null;
   }
 
-  if (cell.vaisseau) {
-    return {
-      type: "ship",
-      data: cell.vaisseau
-    };
+  return state.mapCells.find((cell) => cell.coord_x === coordX && cell.coord_y === coordY) || null;
+}
+
+function findCellByShipId(shipId) {
+  if (!shipId) {
+    return null;
+  }
+
+  return state.mapCells.find((cell) => cell.vaisseau?.idVaisseau === shipId) || null;
+}
+
+function findCellByPlanetId(planetId) {
+  if (!planetId) {
+    return null;
+  }
+
+  return state.mapCells.find((cell) => cell.planete?.identifiant === planetId) || null;
+}
+
+function normalizeTeamId(teamId) {
+  if (!teamId) {
+    return null;
+  }
+
+  if (typeof teamId === "string") {
+    return teamId;
+  }
+
+  return teamId.idEquipe || teamId.teamId || teamId.id || null;
+}
+
+function normalizeShip(ship, cell = null) {
+  if (!ship) {
+    return null;
+  }
+
+  return {
+    ...ship,
+    proprietaire: normalizeTeamId(ship.proprietaire) || normalizeTeamId(cell?.proprietaire),
+    positionX: ship.positionX ?? cell?.coord_x ?? 0,
+    positionY: ship.positionY ?? cell?.coord_y ?? 0
+  };
+}
+
+function normalizePlanetFromCell(cell) {
+  if (!cell?.planete) {
+    return null;
+  }
+
+  return {
+    ...cell.planete,
+    coord_x: cell.coord_x,
+    coord_y: cell.coord_y,
+    proprietaire: normalizeTeamId(cell.planete.proprietaire) || normalizeTeamId(cell.proprietaire)
+  };
+}
+
+function buildCellSelection(cell) {
+  const normalizedCell = normalizeCell(cell);
+  if (!normalizedCell) {
+    return null;
   }
 
   return {
     type: "cell",
-    data: cell
+    cell: normalizedCell,
+    ship: null,
+    planet: null
   };
+}
+
+function buildShipSelectionFromCell(cell) {
+  const normalizedCell = normalizeCell(cell);
+  if (!normalizedCell?.vaisseau) {
+    return buildCellSelection(normalizedCell);
+  }
+
+  return {
+    type: "ship",
+    cell: normalizedCell,
+    ship: normalizeShip(normalizedCell.vaisseau, normalizedCell),
+    planet: null
+  };
+}
+
+function buildPlanetSelectionFromCell(cell) {
+  const normalizedCell = normalizeCell(cell);
+  if (!normalizedCell?.planete) {
+    return buildCellSelection(normalizedCell);
+  }
+
+  return {
+    type: "planet",
+    cell: normalizedCell,
+    ship: null,
+    planet: normalizePlanetFromCell(normalizedCell)
+  };
+}
+
+function buildSelectionFromCell(cell) {
+  const normalizedCell = normalizeCell(cell);
+  if (!normalizedCell) {
+    return null;
+  }
+
+  if (normalizedCell.vaisseau) {
+    return buildShipSelectionFromCell(normalizedCell);
+  }
+
+  if (normalizedCell.planete) {
+    return buildPlanetSelectionFromCell(normalizedCell);
+  }
+
+  return buildCellSelection(normalizedCell);
+}
+
+function buildSelectionForShip(ship) {
+  if (!ship) {
+    return null;
+  }
+
+  const matchedCell =
+    findCellByShipId(ship.idVaisseau) ||
+    findCellByCoords(ship.positionX, ship.positionY);
+
+  if (matchedCell?.vaisseau?.idVaisseau === ship.idVaisseau) {
+    return buildShipSelectionFromCell(matchedCell);
+  }
+
+  return {
+    type: "ship",
+    cell: createCellStub(ship.positionX, ship.positionY, { vaisseau: normalizeShip(ship) }),
+    ship: normalizeShip(ship),
+    planet: null
+  };
+}
+
+function buildSelectionForPlanet(planet) {
+  if (!planet) {
+    return null;
+  }
+
+  const matchedCell =
+    findCellByPlanetId(planet.identifiant) ||
+    findCellByCoords(planet.coord_x, planet.coord_y);
+
+  if (matchedCell?.planete?.identifiant === planet.identifiant) {
+    return buildPlanetSelectionFromCell(matchedCell);
+  }
+
+  const normalizedPlanet = {
+    ...planet,
+    coord_x: planet.coord_x ?? 0,
+    coord_y: planet.coord_y ?? 0,
+    proprietaire: normalizeTeamId(planet.proprietaire)
+  };
+
+  return {
+    type: "planet",
+    cell: createCellStub(normalizedPlanet.coord_x, normalizedPlanet.coord_y, {
+      proprietaire: normalizedPlanet.proprietaire,
+      planete: normalizedPlanet
+    }),
+    ship: null,
+    planet: normalizedPlanet
+  };
+}
+
+function getSelectionFromState() {
+  if (state.selectedShip?.idVaisseau) {
+    return buildSelectionForShip(state.selectedShip);
+  }
+
+  if (state.selectedPlanet?.identifiant) {
+    return buildSelectionForPlanet(state.selectedPlanet);
+  }
+
+  if (state.selectedCell) {
+    return buildSelectionFromCell(
+      findCellByCoords(state.selectedCell.coord_x, state.selectedCell.coord_y) || state.selectedCell
+    );
+  }
+
+  return null;
+}
+
+function isSameSelectedCell(cell) {
+  return Boolean(
+    cell &&
+    state.selectedCell &&
+    state.selectedCell.coord_x === cell.coord_x &&
+    state.selectedCell.coord_y === cell.coord_y
+  );
+}
+
+function getClickSelection(cell) {
+  const normalizedCell = normalizeCell(cell);
+  if (!normalizedCell) {
+    return null;
+  }
+
+  const hasShip = Boolean(normalizedCell.vaisseau);
+  const hasPlanet = Boolean(normalizedCell.planete);
+
+  if (hasShip && hasPlanet) {
+    if (isSameSelectedCell(normalizedCell) && state.selectedShip?.idVaisseau === normalizedCell.vaisseau.idVaisseau) {
+      return buildPlanetSelectionFromCell(normalizedCell);
+    }
+
+    if (isSameSelectedCell(normalizedCell) && state.selectedPlanet?.identifiant === normalizedCell.planete.identifiant) {
+      return buildShipSelectionFromCell(normalizedCell);
+    }
+
+    return buildShipSelectionFromCell(normalizedCell);
+  }
+
+  return buildSelectionFromCell(normalizedCell);
 }
 
 function clearCurrentSelection() {
@@ -274,37 +489,35 @@ function clearCurrentSelection() {
   }
 }
 
-function selectCell(cell) {
+function applySelection(selection) {
   clearCurrentSelection();
-  state.selectedCell = cell;
-  state.selectedPlanet = null;
-  state.selectedShip = null;
-  showCellInfo(cell);
-  highlightCell(cell.coord_x, cell.coord_y, true);
-}
 
-function selectShip(ship) {
-  clearCurrentSelection();
-  state.selectedCell = null;
-  state.selectedPlanet = null;
-  state.selectedShip = ship;
-  showShipInfo(ship);
-
-  if (ship?.idVaisseau) {
-    highlightShip(ship.idVaisseau, true);
+  if (!selection) {
+    closeInfoPanel();
+    return;
   }
-}
 
-function selectPlanet(planet) {
-  clearCurrentSelection();
-  state.selectedCell = null;
-  state.selectedShip = null;
-  state.selectedPlanet = planet;
-  showPlanetInfo(planet);
+  state.selectedCell = selection.cell || null;
+  state.selectedShip = selection.ship || null;
+  state.selectedPlanet = selection.planet || null;
 
-  if (planet?.identifiant) {
-    highlightPlanet(planet.identifiant, true);
+  if (state.selectedCell) {
+    highlightCell(state.selectedCell.coord_x, state.selectedCell.coord_y, true);
   }
+
+  if (state.selectedShip?.idVaisseau) {
+    highlightShip(state.selectedShip.idVaisseau, true);
+    showShipInfo(state.selectedShip);
+    return;
+  }
+
+  if (state.selectedPlanet?.identifiant) {
+    highlightPlanet(state.selectedPlanet.identifiant, true);
+    showPlanetInfo(state.selectedPlanet);
+    return;
+  }
+
+  showCellInfo(state.selectedCell);
 }
 
 async function handlePrimaryMapClick(event, element, raycaster, mouse) {
@@ -314,60 +527,19 @@ async function handlePrimaryMapClick(event, element, raycaster, mouse) {
   raycaster.setFromCamera(mouse, camera);
 
   const clickedCell = getCellFromRay(raycaster);
-  const preciseHit = getClickedObject(raycaster);
-  const hit = clickedCell ? { type: "cell", data: clickedCell } : (
-    preciseHit?.type === "cell"
-      ? { type: "cell", data: preciseHit.data }
-      : preciseHit
-  );
+  const selection = clickedCell ? getClickSelection(clickedCell) : null;
 
   if (state.pendingAction) {
-    let coordX;
-    let coordY;
-
     if (clickedCell) {
-      coordX = clickedCell.coord_x;
-      coordY = clickedCell.coord_y;
-    } else if (hit?.type === "planet") {
-      coordX = hit.data.coord_x;
-      coordY = hit.data.coord_y;
-    } else if (hit?.type === "ship") {
-      coordX = hit.data.positionX;
-      coordY = hit.data.positionY;
-    }
-
-    if (coordX !== undefined && coordY !== undefined) {
-      const executed = await executePendingAction(coordX, coordY);
+      const executed = await executePendingAction(clickedCell.coord_x, clickedCell.coord_y);
       if (executed) {
         await fullSync();
       }
-      return;
     }
-  }
-
-  if (!hit) {
-    clearCurrentSelection();
-    closeInfoPanel();
     return;
   }
 
-  if (hit.type === "cell") {
-    selectCell(hit.data);
-    return;
-  }
-
-  if (hit.type === "ship") {
-    selectShip(hit.data);
-    return;
-  }
-
-  if (hit.type === "planet") {
-    selectPlanet(hit.data);
-    return;
-  }
-
-  clearCurrentSelection();
-  closeInfoPanel();
+  applySelection(selection);
 }
 
 function centerViewOnFleet() {
@@ -587,7 +759,7 @@ function selectShipByIndex(index) {
 
   teamSelectIndex = ((index % ships.length) + ships.length) % ships.length;
   const ship = ships[teamSelectIndex];
-  selectShip(ship);
+  applySelection(buildSelectionForShip(ship));
 
   if (ship.positionX !== undefined && ship.positionY !== undefined) {
     if (state.fullMapMode) {
