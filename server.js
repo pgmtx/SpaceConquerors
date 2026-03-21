@@ -1,12 +1,13 @@
 const apiPrefixes = ["/equipes", "/monde", "/market", "/regles"];
-const apiBase = "http://" + process.env.KEYCLOAK_LINK;
+const serverLink = "http://" + process.env.KEYCLOAK_LINK;
+const apiBase = "http://" + process.env.API_BASE;
 
 let accessToken = process.env.ACCESS_TOKEN;
 let refreshToken = process.env.REFRESH_TOKEN;
 
 async function refresh() {
 	const res = await fetch(
-		apiBase + "/realms/24hcode/protocol/openid-connect/token",
+		serverLink + "/realms/24hcode/protocol/openid-connect/token",
 		{
 			method: "POST",
 			headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -20,7 +21,7 @@ async function refresh() {
 	);
 	const data = await res.json();
 	accessToken = data.access_token;
-	refreshToken = data.refresh_token; // le nouveau refresh token
+	refreshToken = data.refresh_token;
 }
 
 setInterval(refresh, 59 * 60 * 1000);
@@ -30,11 +31,14 @@ Bun.serve({
 	port: 3000,
 	async fetch(req) {
 		const url = new URL(req.url);
+		const targetUrl = apiBase + url.pathname + url.search;
+		console.log("→", req.method, targetUrl);
+
 		if (apiPrefixes.some((prefix) => url.pathname.startsWith(prefix))) {
 			const res = await fetch(apiBase + url.pathname + url.search, {
-				headers: { Authorization: `Bearer ${process.env.API_TOKEN}` },
+				headers: { Authorization: `Bearer ${accessToken}` },
 			});
-			const text = await res.text(); // consomme le body
+			const text = await res.text();
 			console.log(res.status, text);
 			return new Response(text, {
 				headers: { "Content-Type": "application/json" },
