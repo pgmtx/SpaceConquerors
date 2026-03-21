@@ -1,21 +1,22 @@
 import * as THREE from 'three'
-import { initScene, scene, camera, controls, render, worldPos, panCameraTo, focusOnShip } from './scene.js'
+import { initScene, camera, render, panCameraTo, focusOnShip } from './scene.js'
 import { renderMap, animateMap, getClickedObject, highlightShip, clearMap } from './mapRenderer.js'
 import {
   setLoading, hideLoading, notify, updateCoords,
-  updateTeamHUD, updateLeaderboard, showShipInfo, showPlanetInfo,
+  updateHUD, updateLeaderboard, showShipInfo, showPlanetInfo,
   closeInfoPanel, initMinimap, drawMinimap, executePendingAction,
-  refreshSelectedPlanet,
+  refreshSelectedPlanet, openMarket,
+  clearPendingAction,
 } from './ui.js'
 import { getTeamIdFromToken, getMap, getAllTeams, getShips, getModules } from './api.js'
 import { preloadAllModels } from './models.js'
 import { state } from './state.js'
 
-// ── Bootstrap ─────────────────────────────────────────────────
+// ── Bootstrap ──────────────────────────────────────────────────
 async function main() {
   setLoading(5, 'CONNEXION AU SERVEUR...')
 
-  // Récupérer le token depuis le serveur proxy pour décoder le team_id
+  // Fetch token from proxy server to decode team_id
   const tokenRes = await fetch('/token').then(r => r.json()).catch(() => null)
   const token = tokenRes?.access_token || ''
   if (!token) {
@@ -27,7 +28,7 @@ async function main() {
 
   setLoading(15, 'CHARGEMENT DES MODÈLES 3D...')
 
-  // Init Three.js scene
+  // Init Three.js scene in the canvas container
   const container = document.getElementById('canvas-container')
   initScene(container)
 
@@ -38,29 +39,28 @@ async function main() {
 
   setLoading(60, 'RÉCUPÉRATION DE LA CARTE...')
 
-  // Init minimap
+  // Init minimap canvas
   initMinimap()
 
-  // Initial data load (2 requests total)
+  // Initial data load
   await Promise.allSettled([refreshMap(), refreshAllTeams()])
 
   setLoading(95, 'PRÊT')
-  await new Promise(r => setTimeout(r, 400))
+  await new Promise(r => setTimeout(r, 350))
   hideLoading()
 
-  // Start game loop
+  // Start render loop, input, and UI wiring
   startGameLoop()
   registerInput()
-  registerRefreshButton()
+  registerButtons()
 }
 
-// ── Game loop ─────────────────────────────────────────────────
+// ── Game loop ──────────────────────────────────────────────────
 function startGameLoop() {
   let lastTime = 0
   function loop(time) {
     const delta = (time - lastTime) / 1000
     lastTime = time
-
     handleKeyMovement(delta)
     animateMap(delta)
     render(delta)
@@ -69,7 +69,7 @@ function startGameLoop() {
   requestAnimationFrame(loop)
 }
 
-// ── Data fetchers (2 requests per manual refresh) ────────────
+// ── Data fetchers ──────────────────────────────────────────────
 async function refreshMap() {
   const { viewX, viewY, viewSize } = state
   try {
@@ -96,32 +96,16 @@ async function refreshAllTeams() {
     state.allTeams = teams || []
     state.myTeam = state.allTeams.find(t => t.idEquipe === state.teamId) || null
     if (state.myTeam) {
-      // positionX/Y absents de /equipes, forcer proprietaire pour les boutons
+      // positionX/Y from /equipes/{id}/vaisseaux — inject proprietaire for button gating
       if (myShips) state.myTeam.vaisseaux = myShips.map(s => ({ ...s, proprietaire: state.teamId }))
-      // modules avec idPlanete null = disponibles à poser
       if (myModules) state.myTeam.modules = myModules
     }
-    updateTeamHUD(state.myTeam)
+    updateHUD(state.myTeam)
     updateLeaderboard(state.allTeams)
   } catch (e) {
     console.error('Teams error:', e)
     notify('Erreur équipes: ' + e.message, 'error')
   }
-}
-
-// ── Manual refresh button ─────────────────────────────────────
-function registerRefreshButton() {
-  const btn = document.getElementById('refresh-btn')
-  btn.addEventListener('click', async () => {
-    if (btn.disabled) return
-    btn.disabled = true
-    btn.textContent = '⟳ ...'
-    // 2 requests in parallel
-    await Promise.allSettled([refreshMap(), refreshAllTeams()])
-    const now = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    btn.textContent = `⟳ ${now}`
-    btn.disabled = false
-  })
 }
 
 function updateMinimapData(cells) {
@@ -141,13 +125,71 @@ function updateMinimapData(cells) {
   })
 }
 
-// ── Input ─────────────────────────────────────────────────────
+// ── Button registration ────────────────────────────────────────
+function registerButtons() {
+  // Refresh / sync button
+  const refreshBtn = document.getElementById('refresh-btn')
+  refreshBtn.addEventListener('click', async () => {
+    if (refreshBtn.disabled) return
+    refreshBtn.disabled = true
+    refreshBtn.textContent = '⟳ ...'
+    await Promise.allSettled([refreshMap(), refreshAllTeams()])
+    const now = new Date().toLocaleTimeString('fr-FR', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+    refreshBtn.textContent = `⟳ ${now}`
+    refreshBtn.disabled = false
+  })
+
+  // Leaderboard toggle
+  document.getElementById('lb-toggle').addEventListener('click', () => {
+    document.getElementById('leaderboard').classList.toggle('hidden')
+  })
+
+  // Market button
+  document.getElementById('market-btn').addEventListener('click', () => openMarket())
+
+  // Market modal close
+  document.getElementById('market-close').addEventListener('click', () => {
+    document.getElementById('market-modal').classList.add('hidden')
+  })
+
+  // Ship builder close/cancel
+  document.getElementById('builder-close').addEventListener('click', () => {
+    document.getElementById('builder-modal').classList.add('hidden')
+  })
+  document.getElementById('builder-cancel').addEventListener('click', () => {
+    document.getElementById('builder-modal').classList.add('hidden')
+  })
+
+  // Rename modal close/cancel
+  document.getElementById('rename-close').addEventListener('click', () => {
+    document.getElementById('rename-modal').classList.add('hidden')
+  })
+  document.getElementById('rename-cancel').addEventListener('click', () => {
+    document.getElementById('rename-modal').classList.add('hidden')
+  })
+
+  // Close modals on overlay click
+  ;['market-modal', 'builder-modal', 'rename-modal'].forEach(id => {
+    document.getElementById(id).addEventListener('click', e => {
+      if (e.target === e.currentTarget) {
+        e.currentTarget.classList.add('hidden')
+      }
+    })
+  })
+}
+
+// ── Input ──────────────────────────────────────────────────────
 const keys = {}
 let shipSelectIndex = 0
 
 function selectShipByIndex(index) {
   const ships = state.myTeam?.vaisseaux
-  if (!ships || ships.length === 0) { notify('Aucun vaisseau disponible', 'error'); return }
+  if (!ships || ships.length === 0) {
+    notify('Aucun vaisseau disponible', 'error')
+    return
+  }
   shipSelectIndex = ((index % ships.length) + ships.length) % ships.length
   const vaisseau = ships[shipSelectIndex]
   state.selectedShip = vaisseau
@@ -169,8 +211,8 @@ function registerInput() {
   window.addEventListener('keydown', e => {
     keys[e.key] = true
     if (e.key === 'Escape') {
+      clearPendingAction()
       closeInfoPanel()
-      state.pendingAction = null
     }
     if (e.key === 'Tab') {
       e.preventDefault()
@@ -179,7 +221,7 @@ function registerInput() {
   })
   window.addEventListener('keyup', e => { keys[e.key] = false })
 
-  // Click to select
+  // Click to select on the 3D canvas
   const raycaster = new THREE.Raycaster()
   const mouse = new THREE.Vector2()
   let lastClick = 0
@@ -190,36 +232,48 @@ function registerInput() {
     if (now - lastClick < 200) return
     lastClick = now
 
-    mouse.x = (e.clientX / window.innerWidth) * 2 - 1
+    mouse.x =  (e.clientX / window.innerWidth)  * 2 - 1
     mouse.y = -(e.clientY / window.innerHeight) * 2 + 1
     raycaster.setFromCamera(mouse, camera)
 
     const hit = getClickedObject(raycaster)
-    if (!hit) {
-      closeInfoPanel()
-      return
-    }
 
-    // If there's a pending action, consume this click as coords
+    // If pending action: consume this click as the target coordinates
     if (state.pendingAction) {
       let cx, cy
-      if (hit.type === 'cell') { cx = hit.data?.coord_x; cy = hit.data?.coord_y }
-      else if (hit.type === 'planet') { cx = hit.data?.coord_x; cy = hit.data?.coord_y }
-      else if (hit.type === 'ship') { cx = hit.data?.positionX; cy = hit.data?.positionY }
-      if (cx !== undefined) {
-        const action = state.pendingAction?.action
-        await executePendingAction(cx, cy)
-        // Refresh map après l'action pour voir les HP à jour
-        await refreshMap()
-        // Si c'était une attaque sur une planète, ré-afficher son panneau avec les HP à jour
-        if (action === 'ATTAQUER' && hit.type === 'planet') {
-          const updatedCell = state.mapCells.find(
-            c => c.coord_x === cx && c.coord_y === cy && c.planete
-          )
-          if (updatedCell?.planete) showPlanetInfo(updatedCell.planete)
+      if (hit) {
+        if (hit.type === 'cell')   { cx = hit.data?.coord_x;  cy = hit.data?.coord_y }
+        if (hit.type === 'planet') { cx = hit.data?.coord_x;  cy = hit.data?.coord_y }
+        if (hit.type === 'ship')   { cx = hit.data?.positionX; cy = hit.data?.positionY }
+      }
+      if (cx !== undefined && cy !== undefined) {
+        const prevAction = state.pendingAction?.action
+        const executed = await executePendingAction(cx, cy)
+        if (executed) {
+          await refreshMap()
+          await refreshAllTeams()
+          // Re-show entity info if the action targeted a planet
+          if (prevAction === 'ATTAQUER' && hit?.type === 'planet') {
+            const updatedCell = state.mapCells.find(
+              c => c.coord_x === cx && c.coord_y === cy && c.planete
+            )
+            if (updatedCell?.planete) showPlanetInfo(updatedCell.planete)
+          }
+          // Re-show selected ship with updated data
+          if (state.selectedShip) {
+            const updated = state.myTeam?.vaisseaux?.find(
+              v => v.idVaisseau === state.selectedShip.idVaisseau
+            )
+            if (updated) showShipInfo(updated)
+          }
         }
         return
       }
+    }
+
+    if (!hit) {
+      closeInfoPanel()
+      return
     }
 
     if (hit.type === 'ship') {
@@ -235,13 +289,10 @@ function registerInput() {
       closeInfoPanel()
     }
   })
-
-  // Close info panel button
-  document.getElementById('info-close').addEventListener('click', closeInfoPanel)
 }
 
-// ── Keyboard map movement ─────────────────────────────────────
-let moveAccum = { x: 0, y: 0 }
+// ── Keyboard map movement ──────────────────────────────────────
+const moveAccum = { x: 0, y: 0 }
 
 function handleKeyMovement(delta) {
   const speed = 8 * delta
@@ -251,7 +302,6 @@ function handleKeyMovement(delta) {
   if (keys['ArrowUp']    || keys['w'] || keys['W']) moveAccum.y -= speed
   if (keys['ArrowDown']  || keys['s'] || keys['S']) moveAccum.y += speed
 
-  // Shift viewport by whole cells
   if (Math.abs(moveAccum.x) >= 1) {
     const step = Math.sign(moveAccum.x) * Math.floor(Math.abs(moveAccum.x))
     state.viewX = Math.max(0, Math.min(58 - state.viewSize, state.viewX + step))
@@ -271,7 +321,6 @@ function handleKeyMovement(delta) {
 let moveRefreshTimeout = null
 function scheduleMapRefresh() {
   clearTimeout(moveRefreshTimeout)
-  // Only refresh the map (1 request) when navigating — team data unchanged
   moveRefreshTimeout = setTimeout(async () => {
     clearMap()
     await refreshMap()

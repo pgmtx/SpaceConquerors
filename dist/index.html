@@ -3,295 +3,649 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Space Conquerors</title>
+  <title>Space Conquerors — SC2</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; color: #00ffcc; }
+    body {
+      background: #0a0e1a;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+      color: #00ccff;
+      user-select: none;
+    }
 
     #canvas-container {
-      position: fixed; inset: 0;
+      position: fixed;
+      inset: 0;
+      bottom: 180px;
+      top: 40px;
     }
 
-    /* ── TOP BAR ───────────────────────────────── */
-    #hud-top {
-      position: fixed; top: 0; left: 0; right: 0;
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 8px 16px;
-      background: linear-gradient(180deg, rgba(0,10,20,0.95) 0%, rgba(0,10,20,0) 100%);
-      pointer-events: none; z-index: 10;
-    }
-    #team-info {
-      display: flex; align-items: center; gap: 12px;
-    }
-    #team-name {
-      font-size: 18px; font-weight: bold;
-      color: #00ffcc; text-shadow: 0 0 10px #00ffcc;
-      letter-spacing: 2px;
-    }
-    #team-score {
-      font-size: 13px; color: #88ffdd; background: rgba(0,255,204,0.1);
-      padding: 2px 8px; border: 1px solid rgba(0,255,204,0.3); border-radius: 4px;
-    }
-    #resources {
-      display: flex; gap: 12px; align-items: center;
-    }
-    .resource-chip {
-      display: flex; align-items: center; gap: 4px;
-      font-size: 12px; padding: 3px 8px;
-      background: rgba(0,20,40,0.8); border: 1px solid rgba(0,150,200,0.4);
-      border-radius: 4px; color: #aaddff;
-    }
-    .resource-chip .icon { font-size: 14px; }
-    #coords-display {
-      font-size: 12px; color: #557799; letter-spacing: 1px;
-    }
-    #refresh-btn {
-      font-family: 'Courier New', monospace;
-      font-size: 12px; letter-spacing: 1px;
-      padding: 5px 14px;
-      background: rgba(0,60,100,0.7); border: 1px solid rgba(0,200,255,0.6);
-      color: #00ffcc; border-radius: 4px; cursor: pointer;
-      transition: all 0.15s; pointer-events: all;
-    }
-    #refresh-btn:hover:not(:disabled) {
-      background: rgba(0,100,160,0.9); box-shadow: 0 0 8px rgba(0,255,204,0.3);
-    }
-    #refresh-btn:disabled { opacity: 0.5; cursor: wait; }
-
-    /* ── MINIMAP ───────────────────────────────── */
-    #minimap-container {
-      position: fixed; bottom: 20px; left: 20px;
-      background: rgba(0,10,20,0.9); border: 1px solid rgba(0,150,200,0.5);
-      border-radius: 6px; padding: 6px; z-index: 10;
-    }
-    #minimap-title {
-      font-size: 9px; color: #557799; text-align: center; letter-spacing: 2px;
-      margin-bottom: 4px;
-    }
-    #minimap { cursor: crosshair; display: block; }
-
-    /* ── LEADERBOARD ───────────────────────────── */
-    #leaderboard {
-      position: fixed; top: 60px; right: 20px; width: 240px;
-      background: rgba(0,10,20,0.9); border: 1px solid rgba(0,150,200,0.4);
-      border-radius: 6px; padding: 10px; z-index: 10;
-    }
-    #leaderboard h3 {
-      font-size: 11px; letter-spacing: 3px; color: #557799;
-      text-align: center; margin-bottom: 8px; text-transform: uppercase;
-    }
-    .lb-row {
-      display: flex; align-items: center; gap: 6px;
-      padding: 4px 4px; border-radius: 3px; margin-bottom: 2px;
-      font-size: 11px; transition: background 0.2s;
-    }
-    .lb-row:hover { background: rgba(0,100,150,0.2); }
-    .lb-rank { color: #557799; width: 18px; text-align: right; font-size: 10px; }
-    .lb-color { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .lb-name { flex: 1; color: #aaddff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .lb-pts { color: #00ffcc; font-size: 11px; font-weight: bold; }
-    .lb-row.my-team { background: rgba(0,255,204,0.08); border: 1px solid rgba(0,255,204,0.2); }
-    .lb-row.my-team .lb-name { color: #00ffcc; }
-
-    /* ── INFO PANEL ────────────────────────────── */
-    #info-panel {
-      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-      min-width: 380px; max-width: 600px;
-      background: rgba(0,10,20,0.95); border: 1px solid rgba(0,150,200,0.5);
-      border-radius: 8px; padding: 12px 16px; z-index: 10;
-      display: none;
-    }
-    #info-panel.visible { display: block; }
-    #info-panel-title {
-      font-size: 14px; font-weight: bold; color: #00ffcc;
-      letter-spacing: 1px; margin-bottom: 8px;
-      display: flex; align-items: center; justify-content: space-between;
-    }
-    #info-close {
-      cursor: pointer; font-size: 16px; color: #557799;
-      pointer-events: all; padding: 0 4px;
-    }
-    #info-close:hover { color: #ff4466; }
-    #info-body {
-      font-size: 12px; display: flex; gap: 20px;
-    }
-    .info-col { flex: 1; }
-    .info-row { display: flex; justify-content: space-between; padding: 2px 0; }
-    .info-label { color: #557799; }
-    .info-value { color: #aaddff; }
-    .info-value.good { color: #00ffcc; }
-    .info-value.bad { color: #ff4466; }
-
-    /* ── ACTIONS ───────────────────────────────── */
-    #actions-panel {
-      margin-top: 10px; display: none;
-      border-top: 1px solid rgba(0,150,200,0.3); padding-top: 10px;
-    }
-    #actions-panel.visible { display: block; }
-    #actions-title { font-size: 10px; color: #557799; letter-spacing: 2px; margin-bottom: 6px; }
-    #actions-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
-    .action-btn {
-      font-family: 'Courier New', monospace;
-      font-size: 11px; padding: 4px 10px;
-      background: rgba(0,80,120,0.5); border: 1px solid rgba(0,150,200,0.6);
-      color: #aaddff; border-radius: 4px; cursor: pointer;
-      pointer-events: all; transition: all 0.15s; letter-spacing: 1px;
-    }
-    .action-btn:hover { background: rgba(0,120,180,0.7); color: #fff; border-color: #00aaff; }
-    .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .action-btn.cooldown { border-color: rgba(255,150,0,0.5); color: #ffaa44; }
-
-    /* ── STATS PANEL ───────────────────────────── */
-    #stats-panel {
-      position: fixed; top: 60px; left: 20px; width: 200px;
-      background: rgba(0,10,20,0.9); border: 1px solid rgba(0,150,200,0.4);
-      border-radius: 6px; padding: 10px; z-index: 10;
-    }
-    #stats-panel h3 {
-      font-size: 11px; letter-spacing: 3px; color: #557799;
-      margin-bottom: 8px; text-transform: uppercase;
-    }
-    .stat-bar-row { margin-bottom: 6px; }
-    .stat-bar-label {
-      display: flex; justify-content: space-between;
-      font-size: 10px; color: #557799; margin-bottom: 2px;
-    }
-    .stat-bar-label span:last-child { color: #aaddff; }
-    .stat-bar-track {
-      height: 4px; background: rgba(0,50,80,0.8);
-      border-radius: 2px; overflow: hidden;
-    }
-    .stat-bar-fill {
-      height: 100%; border-radius: 2px; transition: width 0.8s ease;
-    }
-    .stat-bar-fill.ships { background: linear-gradient(90deg, #0080ff, #00ffcc); }
-    .stat-bar-fill.planets { background: linear-gradient(90deg, #8800ff, #ff00aa); }
-    .stat-bar-fill.credits { background: linear-gradient(90deg, #ffaa00, #ffff00); }
-    .stat-bar-fill.minerai { background: linear-gradient(90deg, #ff4400, #ffaa00); }
-
-    /* ── NAV HINT ──────────────────────────────── */
-    #nav-hint {
-      position: fixed; bottom: 20px; right: 20px;
-      font-size: 10px; color: rgba(0,150,200,0.6);
-      text-align: right; pointer-events: none; z-index: 10;
-      line-height: 1.8;
-    }
-
-    /* ── NOTIFICATIONS ─────────────────────────── */
-    #notifications {
-      position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
-      display: flex; flex-direction: column; align-items: center; gap: 6px;
-      z-index: 20; pointer-events: none;
-    }
-    .notif {
-      background: rgba(0,20,40,0.95); border: 1px solid rgba(0,200,255,0.5);
-      color: #aaddff; font-size: 12px; padding: 6px 16px; border-radius: 4px;
-      animation: notifIn 0.3s ease, notifOut 0.5s ease 2.5s forwards;
-    }
-    .notif.error { border-color: rgba(255,50,50,0.5); color: #ff8888; }
-    .notif.success { border-color: rgba(0,255,100,0.5); color: #88ff99; }
-    @keyframes notifIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-    @keyframes notifOut { from { opacity: 1; } to { opacity: 0; } }
-
-    /* ── LOADING ───────────────────────────────── */
+    /* ══════════════════════════════════════════════
+       LOADING SCREEN
+    ══════════════════════════════════════════════ */
     #loading {
-      position: fixed; inset: 0; background: #000;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      z-index: 100;
+      position: fixed; inset: 0;
+      background: #020510;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 200;
     }
     #loading h1 {
-      font-size: 36px; letter-spacing: 8px; color: #00ffcc;
-      text-shadow: 0 0 20px #00ffcc, 0 0 40px #00ffcc;
-      margin-bottom: 20px;
+      font-size: 42px; letter-spacing: 10px;
+      color: #00ccff;
+      text-shadow: 0 0 20px #00ccff, 0 0 60px #0055aa;
+      margin-bottom: 8px; text-transform: uppercase;
+    }
+    #loading-subtitle {
+      font-size: 12px; letter-spacing: 6px;
+      color: #334466; margin-bottom: 40px;
     }
     #loading-bar-track {
-      width: 300px; height: 4px; background: rgba(0,50,80,0.8); border-radius: 2px;
+      width: 360px; height: 3px;
+      background: rgba(0,50,80,0.8);
+      clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%);
     }
     #loading-bar-fill {
-      height: 100%; background: linear-gradient(90deg, #0080ff, #00ffcc);
-      border-radius: 2px; transition: width 0.3s ease;
-      box-shadow: 0 0 8px #00ffcc;
+      height: 100%;
+      background: linear-gradient(90deg, #0040aa, #00ccff);
+      transition: width 0.3s ease;
+      box-shadow: 0 0 12px #00ccff;
     }
-    #loading-status { margin-top: 12px; font-size: 12px; color: #557799; letter-spacing: 2px; }
+    #loading-status {
+      margin-top: 14px; font-size: 11px;
+      color: #335577; letter-spacing: 3px;
+    }
+
+    /* ══════════════════════════════════════════════
+       TOP BAR
+    ══════════════════════════════════════════════ */
+    #hud-top {
+      position: fixed; top: 0; left: 0; right: 0; height: 40px;
+      display: flex; align-items: center;
+      background: linear-gradient(180deg, rgba(5,10,25,0.98) 0%, rgba(5,10,25,0.85) 100%);
+      border-bottom: 1px solid rgba(0,150,220,0.3);
+      padding: 0 10px; gap: 10px;
+      z-index: 30; pointer-events: none;
+    }
+    #hud-top > * { pointer-events: all; }
+
+    #coords-display {
+      font-size: 11px; color: #446688;
+      letter-spacing: 1px; min-width: 110px;
+      flex-shrink: 0;
+    }
+
+    #hud-resources {
+      display: flex; gap: 8px; align-items: center; flex: 1;
+    }
+    .res-chip {
+      display: flex; align-items: center; gap: 4px;
+      font-size: 11px; padding: 2px 8px;
+      background: rgba(0,15,35,0.85);
+      border: 1px solid rgba(0,120,180,0.4);
+      clip-path: polygon(6px 0%, 100% 0%, calc(100% - 6px) 100%, 0% 100%);
+      color: #88ccee; white-space: nowrap;
+    }
+    .res-chip .icon { font-size: 12px; }
+    .res-chip .res-val { color: #00ccff; font-weight: bold; }
+
+    #hud-score {
+      font-size: 12px; color: #ffcc44;
+      text-shadow: 0 0 8px rgba(255,200,0,0.5);
+      letter-spacing: 1px; white-space: nowrap;
+    }
+
+    #hud-buttons {
+      display: flex; gap: 6px; align-items: center;
+    }
+    .hud-btn {
+      font-family: 'Courier New', monospace;
+      font-size: 10px; letter-spacing: 1px;
+      padding: 4px 12px; cursor: pointer;
+      background: rgba(0,30,60,0.8);
+      border: 1px solid rgba(0,180,255,0.5);
+      color: #00ccff;
+      clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+      transition: all 0.15s;
+    }
+    .hud-btn:hover { background: rgba(0,80,140,0.9); box-shadow: 0 0 10px rgba(0,200,255,0.3); }
+    .hud-btn:disabled { opacity: 0.4; cursor: wait; }
+    .hud-btn.active { background: rgba(0,100,180,0.8); border-color: #00ccff; }
+
+    /* ══════════════════════════════════════════════
+       BOTTOM BAR — SC2 STYLE
+    ══════════════════════════════════════════════ */
+    #bottom-bar {
+      position: fixed; bottom: 0; left: 0; right: 0; height: 180px;
+      background: linear-gradient(180deg, rgba(3,8,20,0.97) 0%, rgba(1,4,12,1) 100%);
+      border-top: 2px solid rgba(0,150,220,0.5);
+      display: flex;
+      z-index: 30;
+    }
+
+    /* ── MINIMAP (left section) ── */
+    #minimap-section {
+      width: 180px; flex-shrink: 0;
+      border-right: 1px solid rgba(0,120,180,0.4);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 6px;
+    }
+    #minimap-title {
+      font-size: 8px; color: #334466;
+      letter-spacing: 3px; text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    #minimap {
+      cursor: crosshair; display: block;
+      border: 1px solid rgba(0,120,180,0.3);
+    }
+
+    /* ── CENTER SECTION: portrait + stats + commands ── */
+    #center-section {
+      flex: 1;
+      display: flex;
+      min-width: 0;
+    }
+
+    /* Portrait area */
+    #portrait-area {
+      width: 140px; flex-shrink: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 8px; gap: 4px;
+      border-right: 1px solid rgba(0,100,160,0.3);
+    }
+    #portrait-box {
+      width: 100px; height: 100px;
+      background: rgba(0,15,35,0.9);
+      border: 2px solid rgba(0,150,220,0.6);
+      clip-path: polygon(12px 0%, 100% 0%, calc(100% - 12px) 100%, 0% 100%);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      position: relative; overflow: hidden;
+      font-size: 40px;
+    }
+    #portrait-hp-bar {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      height: 5px; background: rgba(0,0,0,0.5);
+    }
+    #portrait-hp-fill {
+      height: 100%; width: 100%;
+      background: #00ff66;
+      transition: width 0.4s, background 0.4s;
+    }
+    #portrait-name {
+      font-size: 10px; color: #00ccff;
+      letter-spacing: 1px; text-align: center;
+      white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; max-width: 130px;
+    }
+    #portrait-subtitle {
+      font-size: 9px; color: #446688;
+      letter-spacing: 1px; text-align: center;
+    }
+
+    /* Stats panel */
+    #stats-area {
+      flex: 1; min-width: 0;
+      padding: 8px 12px;
+      display: flex; flex-direction: column;
+      justify-content: center; gap: 3px;
+      border-right: 1px solid rgba(0,100,160,0.3);
+    }
+    #stats-label {
+      font-size: 8px; letter-spacing: 3px; color: #334466;
+      text-transform: uppercase; margin-bottom: 4px;
+    }
+    #stats-content { flex: 1; overflow-y: auto; }
+    #stats-content::-webkit-scrollbar { width: 3px; }
+    #stats-content::-webkit-scrollbar-thumb { background: rgba(0,150,220,0.3); }
+
+    .stat-row {
+      display: flex; justify-content: space-between;
+      align-items: center; padding: 2px 0;
+      border-bottom: 1px solid rgba(0,80,120,0.2);
+      font-size: 11px;
+    }
+    .stat-key { color: #446688; letter-spacing: 1px; }
+    .stat-val { color: #aaddff; font-weight: bold; }
+    .stat-val.good { color: #00ff88; }
+    .stat-val.warn { color: #ffaa00; }
+    .stat-val.bad { color: #ff3344; }
+
+    /* Command card */
+    #command-card {
+      width: 220px; flex-shrink: 0;
+      padding: 8px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      grid-template-rows: repeat(3, 1fr);
+      gap: 4px;
+      align-content: start;
+    }
+    .cmd-btn {
+      font-family: 'Courier New', monospace;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 1px;
+      width: 44px; height: 44px;
+      background: rgba(0,20,45,0.9);
+      border: 1px solid rgba(0,120,180,0.5);
+      clip-path: polygon(4px 0%, 100% 0%, calc(100% - 4px) 100%, 0% 100%);
+      cursor: pointer; color: #88aacc;
+      transition: all 0.12s;
+      font-size: 16px; /* icon */
+    }
+    .cmd-btn .cmd-label {
+      font-size: 7px; letter-spacing: 0.5px;
+      color: #446688; text-transform: uppercase;
+      line-height: 1;
+    }
+    .cmd-btn:hover:not(:disabled) {
+      background: rgba(0,80,140,0.9);
+      border-color: #00aaff;
+      color: #fff;
+    }
+    .cmd-btn:hover:not(:disabled) .cmd-label { color: #00aaff; }
+    .cmd-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .cmd-btn.active-action {
+      background: rgba(0,100,200,0.8);
+      border-color: #00ccff;
+      box-shadow: 0 0 8px rgba(0,200,255,0.4);
+    }
+    .cmd-btn.spacer {
+      background: transparent; border: none; cursor: default;
+      clip-path: none;
+    }
+
+    /* ── RIGHT SECTION: nav hint ── */
+    #right-section {
+      width: 120px; flex-shrink: 0;
+      border-left: 1px solid rgba(0,100,160,0.3);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 8px;
+      font-size: 9px; color: rgba(0,120,180,0.5);
+      line-height: 1.9; text-align: center;
+      letter-spacing: 0.5px;
+    }
+
+    /* ══════════════════════════════════════════════
+       LEADERBOARD (right panel, collapsible)
+    ══════════════════════════════════════════════ */
+    #leaderboard {
+      position: fixed; top: 40px; right: 0;
+      width: 220px; bottom: 180px;
+      background: rgba(2,6,18,0.95);
+      border-left: 1px solid rgba(0,120,180,0.35);
+      padding: 10px 8px; z-index: 20;
+      overflow-y: auto;
+      transition: transform 0.25s ease;
+    }
+    #leaderboard.hidden { transform: translateX(100%); }
+    #leaderboard::-webkit-scrollbar { width: 3px; }
+    #leaderboard::-webkit-scrollbar-thumb { background: rgba(0,150,220,0.3); }
+    #leaderboard h3 {
+      font-size: 9px; letter-spacing: 4px; color: #334466;
+      text-align: center; margin-bottom: 10px;
+      text-transform: uppercase; border-bottom: 1px solid rgba(0,100,160,0.3);
+      padding-bottom: 6px;
+    }
+    .lb-row {
+      display: flex; align-items: center; gap: 5px;
+      padding: 4px 3px; border-radius: 2px; margin-bottom: 2px;
+      font-size: 10px; transition: background 0.15s;
+    }
+    .lb-row:hover { background: rgba(0,80,120,0.25); }
+    .lb-rank { color: #334466; width: 16px; text-align: right; font-size: 9px; flex-shrink: 0; }
+    .lb-color { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .lb-name { flex: 1; color: #88aacc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+    .lb-pts { color: #00ccff; font-size: 10px; font-weight: bold; flex-shrink: 0; }
+    .lb-row.my-team { background: rgba(0,200,255,0.06); border: 1px solid rgba(0,200,255,0.18); }
+    .lb-row.my-team .lb-name { color: #00ccff; }
+
+    /* ══════════════════════════════════════════════
+       PENDING ACTION CROSSHAIR
+    ══════════════════════════════════════════════ */
+    #crosshair-indicator {
+      position: fixed;
+      top: 40px; left: 0; right: 0; bottom: 180px;
+      pointer-events: none; z-index: 25;
+      display: none;
+      align-items: center; justify-content: center;
+    }
+    #crosshair-indicator.visible { display: flex; }
+    #crosshair-inner {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+    }
+    #crosshair-svg {
+      width: 60px; height: 60px;
+      animation: crosshairSpin 3s linear infinite;
+    }
+    #crosshair-label {
+      font-size: 11px; color: #00ccff; letter-spacing: 3px;
+      text-shadow: 0 0 10px #00ccff;
+      animation: crosshairPulse 1s ease-in-out infinite alternate;
+    }
+    @keyframes crosshairSpin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes crosshairPulse {
+      from { opacity: 0.5; }
+      to { opacity: 1; }
+    }
+
+    /* ══════════════════════════════════════════════
+       NOTIFICATIONS
+    ══════════════════════════════════════════════ */
+    #notifications {
+      position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+      display: flex; flex-direction: column; align-items: center; gap: 5px;
+      z-index: 100; pointer-events: none;
+    }
+    .notif {
+      background: rgba(2,10,28,0.96);
+      border: 1px solid rgba(0,180,255,0.5);
+      color: #88ccee; font-size: 11px; padding: 5px 18px;
+      clip-path: polygon(10px 0%, 100% 0%, calc(100% - 10px) 100%, 0% 100%);
+      animation: notifIn 0.25s ease, notifOut 0.5s ease 2.5s forwards;
+      letter-spacing: 1px;
+    }
+    .notif.error { border-color: rgba(255,50,60,0.6); color: #ff7788; }
+    .notif.success { border-color: rgba(0,255,120,0.5); color: #66ffaa; }
+    @keyframes notifIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes notifOut { from { opacity: 1; } to { opacity: 0; } }
+
+    /* ══════════════════════════════════════════════
+       MODALS
+    ══════════════════════════════════════════════ */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.75);
+      z-index: 150;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .modal-overlay.hidden { display: none; }
+    .modal-box {
+      background: rgba(2,8,22,0.98);
+      border: 1px solid rgba(0,160,230,0.6);
+      min-width: 480px; max-width: 700px;
+      max-height: 80vh;
+      display: flex; flex-direction: column;
+      clip-path: polygon(16px 0%, 100% 0%, calc(100% - 16px) 100%, 0% 100%);
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px; border-bottom: 1px solid rgba(0,140,200,0.3);
+      font-size: 12px; letter-spacing: 3px; color: #00ccff;
+      text-transform: uppercase;
+    }
+    .modal-close {
+      cursor: pointer; font-size: 18px; color: #446688;
+      background: none; border: none; font-family: inherit;
+      transition: color 0.15s;
+    }
+    .modal-close:hover { color: #ff3344; }
+    .modal-body {
+      padding: 16px 20px; overflow-y: auto; flex: 1;
+    }
+    .modal-body::-webkit-scrollbar { width: 4px; }
+    .modal-body::-webkit-scrollbar-thumb { background: rgba(0,150,220,0.35); }
+    .modal-footer {
+      padding: 12px 20px; border-top: 1px solid rgba(0,140,200,0.3);
+      display: flex; gap: 10px; justify-content: flex-end;
+    }
+
+    /* Market specific */
+    #market-list { display: flex; flex-direction: column; gap: 6px; }
+    .market-offer {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px;
+      background: rgba(0,15,35,0.8);
+      border: 1px solid rgba(0,100,160,0.4);
+      font-size: 11px;
+    }
+    .market-offer .offer-type { flex: 1; color: #88aacc; letter-spacing: 1px; }
+    .market-offer .offer-price { color: #ffcc44; font-weight: bold; min-width: 60px; text-align: right; }
+    .market-offer .offer-seller { color: #446688; font-size: 10px; min-width: 80px; }
+    .market-offer .offer-status { font-size: 10px; letter-spacing: 1px; }
+    .market-offer .offer-status.DISPONIBLE { color: #00ff88; }
+    .market-offer .offer-status.VENDU { color: #ff4466; }
+    .market-offer .offer-status.ANNULE { color: #886644; }
+    .market-offer .btn-buy {
+      font-family: 'Courier New', monospace; font-size: 10px;
+      padding: 3px 10px; cursor: pointer;
+      background: rgba(0,60,120,0.8);
+      border: 1px solid rgba(0,180,255,0.5); color: #00ccff;
+      transition: all 0.12s;
+    }
+    .market-offer .btn-buy:hover { background: rgba(0,100,180,0.9); }
+
+    /* Ship builder */
+    #builder-list { display: flex; flex-direction: column; gap: 6px; }
+    .plan-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px;
+      background: rgba(0,15,35,0.8);
+      border: 1px solid rgba(0,100,160,0.4);
+      cursor: pointer; transition: all 0.12s;
+    }
+    .plan-row:hover { background: rgba(0,50,100,0.8); border-color: #00aaff; }
+    .plan-row.selected { background: rgba(0,80,160,0.8); border-color: #00ccff; }
+    .plan-name { flex: 1; color: #aaddff; font-size: 12px; letter-spacing: 1px; }
+    .plan-stats { display: flex; gap: 14px; font-size: 10px; color: #446688; }
+    .plan-stats span { color: #88aacc; }
+
+    /* Rename modal */
+    #rename-input {
+      width: 100%;
+      background: rgba(0,15,35,0.9);
+      border: 1px solid rgba(0,150,220,0.5);
+      color: #00ccff; font-family: 'Courier New', monospace;
+      font-size: 13px; padding: 8px 12px;
+      letter-spacing: 2px; outline: none;
+    }
+    #rename-input:focus { border-color: #00ccff; box-shadow: 0 0 8px rgba(0,200,255,0.2); }
+
+    /* Action modal button */
+    .modal-btn {
+      font-family: 'Courier New', monospace; font-size: 11px;
+      padding: 6px 20px; cursor: pointer;
+      border: 1px solid rgba(0,180,255,0.5);
+      clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+      transition: all 0.12s; letter-spacing: 1px;
+    }
+    .modal-btn.primary {
+      background: rgba(0,80,160,0.85); color: #00ccff;
+    }
+    .modal-btn.primary:hover { background: rgba(0,120,220,0.9); }
+    .modal-btn.danger {
+      background: rgba(100,20,30,0.8); color: #ff4466;
+      border-color: rgba(255,50,70,0.5);
+    }
+    .modal-btn.danger:hover { background: rgba(160,30,45,0.9); }
+    .modal-btn.secondary {
+      background: rgba(0,20,45,0.8); color: #446688;
+    }
+    .modal-btn.secondary:hover { background: rgba(0,40,80,0.8); color: #88aacc; }
+
+    /* sell form */
+    #sell-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; border-top: 1px solid rgba(0,100,160,0.3); padding-top: 12px; }
+    #sell-form label { font-size: 10px; color: #446688; letter-spacing: 2px; }
+    #sell-module-select, #sell-price-input {
+      background: rgba(0,15,35,0.9);
+      border: 1px solid rgba(0,150,220,0.4);
+      color: #aaddff; font-family: 'Courier New', monospace;
+      font-size: 11px; padding: 5px 8px;
+    }
+    #sell-module-select option { background: #020810; }
+
+    /* ══════════════════════════════════════════════
+       SCROLLBAR GLOBAL
+    ══════════════════════════════════════════════ */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: rgba(0,10,25,0.5); }
+    ::-webkit-scrollbar-thumb { background: rgba(0,120,180,0.4); }
   </style>
-  <script type="module" crossorigin src="/assets/index-onli1urv.js"></script>
+  <script type="module" crossorigin src="/assets/index-Bd5ghYp1.js"></script>
 </head>
 <body>
+  <!-- LOADING -->
   <div id="loading">
     <h1>SPACE CONQUERORS</h1>
+    <div id="loading-subtitle">STARCRAFT EDITION</div>
     <div id="loading-bar-track"><div id="loading-bar-fill" style="width:0%"></div></div>
     <div id="loading-status">INITIALISATION...</div>
   </div>
 
+  <!-- 3D CANVAS -->
   <div id="canvas-container"></div>
 
+  <!-- TOP BAR -->
   <div id="hud-top">
-    <div id="team-info">
-      <div id="team-name">MAKE-ENSIM-GREAT-AGAIN</div>
-      <div id="team-score">⭐ 0 pts</div>
+    <span id="coords-display">[ X:0 Y:0 ]</span>
+    <div id="hud-resources">
+      <div class="res-chip"><span class="icon">⛏</span><span class="res-val" id="res-minerai">0</span></div>
+      <div class="res-chip"><span class="icon">💰</span><span class="res-val" id="res-credits">0</span></div>
+      <div class="res-chip"><span class="icon">🚀</span><span class="res-val" id="res-ships">0</span></div>
     </div>
-    <div id="coords-display">[ X:0 Y:0 ]</div>
-    <button id="refresh-btn">⟳ Rafraîchir</button>
-    <div id="resources">
-      <div class="resource-chip"><span class="icon">⛏</span><span id="res-minerai">0</span></div>
-      <div class="resource-chip"><span class="icon">💰</span><span id="res-credits">0</span></div>
-      <div class="resource-chip"><span class="icon">🚀</span><span id="res-ships">0</span></div>
-    </div>
-  </div>
-
-  <div id="stats-panel">
-    <h3>◈ Dashboard</h3>
-    <div class="stat-bar-row">
-      <div class="stat-bar-label"><span>VAISSEAUX</span><span id="stat-ships-val">0</span></div>
-      <div class="stat-bar-track"><div class="stat-bar-fill ships" id="stat-ships-bar" style="width:0%"></div></div>
-    </div>
-    <div class="stat-bar-row">
-      <div class="stat-bar-label"><span>PLANÈTES</span><span id="stat-planets-val">0</span></div>
-      <div class="stat-bar-track"><div class="stat-bar-fill planets" id="stat-planets-bar" style="width:0%"></div></div>
-    </div>
-    <div class="stat-bar-row">
-      <div class="stat-bar-label"><span>CRÉDITS</span><span id="stat-credits-val">0</span></div>
-      <div class="stat-bar-track"><div class="stat-bar-fill credits" id="stat-credits-bar" style="width:0%"></div></div>
-    </div>
-    <div class="stat-bar-row">
-      <div class="stat-bar-label"><span>MINERAI</span><span id="stat-minerai-val">0</span></div>
-      <div class="stat-bar-track"><div class="stat-bar-fill minerai" id="stat-minerai-bar" style="width:0%"></div></div>
+    <div id="hud-score">⭐ <span id="team-score-val">0</span> pts</div>
+    <div id="hud-buttons">
+      <button class="hud-btn" id="market-btn">◈ MARCHÉ</button>
+      <button class="hud-btn" id="refresh-btn">⟳ SYNC</button>
+      <button class="hud-btn" id="lb-toggle">▤ CLASSEMENT</button>
     </div>
   </div>
 
-  <div id="leaderboard">
+  <!-- PENDING ACTION CROSSHAIR -->
+  <div id="crosshair-indicator">
+    <div id="crosshair-inner">
+      <svg id="crosshair-svg" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="30" cy="30" r="26" stroke="#00ccff" stroke-width="1" stroke-dasharray="4 4" opacity="0.6"/>
+        <line x1="30" y1="4" x2="30" y2="16" stroke="#00ccff" stroke-width="2"/>
+        <line x1="30" y1="44" x2="30" y2="56" stroke="#00ccff" stroke-width="2"/>
+        <line x1="4" y1="30" x2="16" y2="30" stroke="#00ccff" stroke-width="2"/>
+        <line x1="44" y1="30" x2="56" y2="30" stroke="#00ccff" stroke-width="2"/>
+        <rect x="24" y="24" width="12" height="12" stroke="#00ccff" stroke-width="1.5" fill="none" opacity="0.8"/>
+      </svg>
+      <div id="crosshair-label">SÉLECTIONNER CIBLE</div>
+    </div>
+  </div>
+
+  <!-- BOTTOM BAR -->
+  <div id="bottom-bar">
+    <!-- MINIMAP -->
+    <div id="minimap-section">
+      <div id="minimap-title">CARTE GLOBALE</div>
+      <canvas id="minimap" width="160" height="160"></canvas>
+    </div>
+
+    <!-- CENTER -->
+    <div id="center-section">
+      <!-- PORTRAIT -->
+      <div id="portrait-area">
+        <div id="portrait-box">
+          <span id="portrait-icon">◈</span>
+          <div id="portrait-hp-bar"><div id="portrait-hp-fill"></div></div>
+        </div>
+        <div id="portrait-name">---</div>
+        <div id="portrait-subtitle">AUCUNE SÉLECTION</div>
+      </div>
+
+      <!-- STATS -->
+      <div id="stats-area">
+        <div id="stats-label">INFORMATIONS</div>
+        <div id="stats-content"></div>
+      </div>
+
+      <!-- COMMAND CARD -->
+      <div id="command-card">
+        <!-- Filled dynamically -->
+      </div>
+    </div>
+
+    <!-- RIGHT HINT -->
+    <div id="right-section">
+      WASD / ↑↓←→<br>Déplacer<br><br>
+      TAB<br>Vaisseau suivant<br><br>
+      ESC<br>Annuler<br><br>
+      Clic<br>Sélectionner
+    </div>
+  </div>
+
+  <!-- LEADERBOARD -->
+  <div id="leaderboard" class="hidden">
     <h3>◈ Classement</h3>
     <div id="leaderboard-list"></div>
   </div>
 
-  <div id="minimap-container">
-    <div id="minimap-title">CARTE GLOBALE</div>
-    <canvas id="minimap" width="174" height="174"></canvas>
-  </div>
-
-  <div id="info-panel">
-    <div id="info-panel-title">
-      <span id="info-title">--</span>
-      <span id="info-close">✕</span>
-    </div>
-    <div id="info-body">
-      <div class="info-col" id="info-col-1"></div>
-      <div class="info-col" id="info-col-2"></div>
-    </div>
-    <div id="actions-panel">
-      <div id="actions-title">◈ ACTIONS DISPONIBLES</div>
-      <div id="actions-buttons"></div>
-    </div>
-  </div>
-
+  <!-- NOTIFICATIONS -->
   <div id="notifications"></div>
 
-  <div id="nav-hint">
-    WASD / ↑↓←→ Déplacer<br>
-    Molette: Zoom<br>
-    Clic: Sélectionner<br>
-    ESC: Fermer
+  <!-- MARKET MODAL -->
+  <div class="modal-overlay hidden" id="market-modal">
+    <div class="modal-box" style="min-width:600px">
+      <div class="modal-header">
+        ◈ MARCHÉ GALACTIQUE
+        <button class="modal-close" id="market-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="market-loading" style="text-align:center;color:#446688;font-size:11px;letter-spacing:2px;padding:20px 0;">CHARGEMENT...</div>
+        <div id="market-list"></div>
+        <div id="sell-form">
+          <div style="font-size:10px;color:#00ccff;letter-spacing:3px;margin-bottom:4px;">◈ VENDRE UN MODULE</div>
+          <label for="sell-module-select">MODULE À VENDRE</label>
+          <select id="sell-module-select">
+            <option value="">-- Sélectionner un module --</option>
+          </select>
+          <label for="sell-price-input">PRIX (crédits)</label>
+          <input type="number" id="sell-price-input" min="1" placeholder="100" />
+          <div style="display:flex;gap:8px;margin-top:4px;">
+            <button class="modal-btn primary" id="sell-confirm-btn">◈ METTRE EN VENTE</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
-
+
+  <!-- SHIP BUILDER MODAL -->
+  <div class="modal-overlay hidden" id="builder-modal">
+    <div class="modal-box">
+      <div class="modal-header">
+        🔨 CONSTRUCTION DE VAISSEAU
+        <button class="modal-close" id="builder-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="font-size:10px;color:#446688;letter-spacing:2px;margin-bottom:12px;" id="builder-planet-label">PLANÈTE: ---</div>
+        <div id="builder-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn secondary" id="builder-cancel">ANNULER</button>
+        <button class="modal-btn primary" id="builder-confirm">◈ CONSTRUIRE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RENAME MODAL -->
+  <div class="modal-overlay hidden" id="rename-modal">
+    <div class="modal-box" style="min-width:360px">
+      <div class="modal-header">
+        ✏ RENOMMER LE VAISSEAU
+        <button class="modal-close" id="rename-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:10px;font-size:10px;color:#446688;letter-spacing:2px;">NOUVEAU NOM</div>
+        <input type="text" id="rename-input" maxlength="40" placeholder="Entrez le nouveau nom..." />
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn secondary" id="rename-cancel">ANNULER</button>
+        <button class="modal-btn primary" id="rename-confirm">✓ CONFIRMER</button>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>

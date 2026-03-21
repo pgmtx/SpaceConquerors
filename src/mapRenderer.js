@@ -42,6 +42,9 @@ const TYPE_OVERRIDES = {
 const cellObjects = new Map()   // key: "x_y" → { group, type, shipMesh }
 const shipObjects = new Map()   // key: shipId → mesh
 
+// Currently selected ship ID (for wireframe ring highlight)
+let selectedShipId = null
+
 export function clearMap() {
   cellObjects.forEach(({ group }) => scene.remove(group))
   cellObjects.clear()
@@ -79,7 +82,7 @@ export async function renderMap(cells) {
     } else {
       // Update ownership glow on existing tile
       updateCellTile(existing.group, cell)
-      // Mettre à jour les données planète (HP, minerai, etc.)
+      // Update planet data (HP, minerai, etc.)
       if (cell.planete) {
         const sphere = existing.group.children.find(c => c.userData.isPlanet)
         if (sphere) sphere.userData.planete = cell.planete
@@ -108,11 +111,11 @@ function buildCellTile(group, cell) {
   const color = ownerId ? getTeamColor(ownerId) : 0x0a1a2a
   const emissive = ownerId ? color : 0x000000
 
-  const geo = new THREE.PlaneGeometry(1.92, 1.92)
+  const geo = new THREE.PlaneGeometry(1.95, 1.95)
   const mat = new THREE.MeshLambertMaterial({
     color,
     emissive,
-    emissiveIntensity: ownerId ? 0.05 : 0,
+    emissiveIntensity: ownerId ? 0.15 : 0,
     transparent: true,
     opacity: ownerId ? 0.35 : 0.15,
   })
@@ -130,7 +133,7 @@ function updateCellTile(group, cell) {
   const color = ownerId ? getTeamColor(ownerId) : 0x0a1a2a
   tile.material.color.setHex(color)
   tile.material.emissive.setHex(ownerId ? color : 0x000000)
-  tile.material.emissiveIntensity = ownerId ? 0.05 : 0
+  tile.material.emissiveIntensity = ownerId ? 0.15 : 0
   tile.material.opacity = ownerId ? 0.35 : 0.15
 }
 
@@ -147,7 +150,8 @@ function buildPlanet(group, planete, ownerId) {
   let colorDef = BIOME_COLORS[biome] || { color: 0x445566, emissive: 0x001122 }
   if (typeOverride) colorDef = typeOverride
 
-  const radius = typePlanete === 'GAZEUSE' ? 0.55 : 0.42
+  // Slightly larger spheres than before
+  const radius = typePlanete === 'GAZEUSE' ? 0.60 : 0.46
   const geo = new THREE.SphereGeometry(radius, 24, 16)
   const mat = new THREE.MeshPhongMaterial({
     color: colorDef.color,
@@ -200,6 +204,11 @@ function buildPlanet(group, planete, ownerId) {
     ring.rotation.x = -Math.PI / 2
     ring.position.y = 0.02
     group.add(ring)
+
+    // Small point light above owned planets for SC2 glow effect
+    const ptLight = new THREE.PointLight(getTeamColor(ownerId), 0.8, 3)
+    ptLight.position.set(0, radius * 2.5, 0)
+    group.add(ptLight)
   }
 
   // Health bar above planet
@@ -251,7 +260,7 @@ function buildHealthBar(group, hp, maxHp, yOffset) {
 }
 
 function buildModuleIndicators(group, modules, planetRadius) {
-  modules.forEach((mod, i) => {
+  modules.forEach((_mod, i) => {
     const angle = (i / modules.length) * Math.PI * 2
     const r = planetRadius * 1.5
     const geo = new THREE.BoxGeometry(0.1, 0.1, 0.1)
@@ -291,6 +300,7 @@ async function placeShip(vaisseau, x, y) {
   model.userData.vaisseau = vaisseau
   model.userData.isShip = true
   model.userData.targetPos = pos.clone()
+  model.userData.shipId = shipId
 
   // Owner color tint
   const ownColor = new THREE.Color(getTeamColor(vaisseau.proprietaire))
@@ -369,11 +379,60 @@ export function getClickedObject(raycaster) {
 }
 
 export function highlightShip(shipId, on) {
+  // Remove old wireframe ring from any previously selected ship
+  if (selectedShipId && selectedShipId !== shipId) {
+    const oldMesh = shipObjects.get(selectedShipId)
+    if (oldMesh) {
+      removeWireframeRing(oldMesh)
+      oldMesh.traverse(child => {
+        if (child.isMesh && child.material) {
+          child.material.emissiveIntensity = 0.3
+        }
+      })
+    }
+  }
+
   const mesh = shipObjects.get(shipId)
   if (!mesh) return
-  mesh.traverse(child => {
-    if (child.isMesh && child.material) {
-      child.material.emissiveIntensity = on ? 0.8 : 0.3
-    }
+
+  if (on) {
+    selectedShipId = shipId
+    mesh.traverse(child => {
+      if (child.isMesh && child.material) {
+        child.material.emissiveIntensity = 0.9
+      }
+    })
+    // Add wireframe ring around selected ship
+    addWireframeRing(mesh)
+  } else {
+    if (selectedShipId === shipId) selectedShipId = null
+    mesh.traverse(child => {
+      if (child.isMesh && child.material) {
+        child.material.emissiveIntensity = 0.3
+      }
+    })
+    removeWireframeRing(mesh)
+  }
+}
+
+function addWireframeRing(mesh) {
+  // Remove any existing ring first
+  removeWireframeRing(mesh)
+  const ringGeo = new THREE.RingGeometry(0.55, 0.7, 32)
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: 0x00ccff,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.85,
   })
+  const ring = new THREE.Mesh(ringGeo, ringMat)
+  ring.rotation.x = -Math.PI / 2
+  ring.position.y = -0.3
+  ring.userData.isSelectionRing = true
+  mesh.add(ring)
+}
+
+function removeWireframeRing(mesh) {
+  const ring = mesh.children.find(c => c.userData.isSelectionRing)
+  if (ring) mesh.remove(ring)
 }

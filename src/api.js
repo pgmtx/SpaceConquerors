@@ -88,9 +88,31 @@ export function removeModule(teamId, moduleId) {
   })
 }
 
+// Plans (blueprints)
+export function getPlans(teamId) {
+  return apiFetch(`/equipes/${teamId}/plans`)
+}
+
 // Marketplace
 export function getMarketOffers() {
   return apiFetch('/market/offres')
+}
+
+export function buyOffer(offerId) {
+  return apiFetch(`/market/offres/${offerId}`)
+}
+
+export function createOffer(body) {
+  return apiFetch('/market/offres', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteOffer(offerId) {
+  return apiFetch(`/market/offres/${offerId}`, {
+    method: 'DELETE',
+  })
 }
 
 // Rules

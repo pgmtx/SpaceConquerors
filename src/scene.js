@@ -11,21 +11,21 @@ export function initScene(container) {
   // Renderer
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-  renderer.setSize(window.innerWidth, window.innerHeight)
+  renderer.setSize(container.clientWidth, container.clientHeight)
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.2
+  renderer.toneMappingExposure = 1.1
   container.appendChild(renderer.domElement)
 
   // Scene
   scene = new THREE.Scene()
-  scene.background = new THREE.Color(0x000205)
-  scene.fog = new THREE.FogExp2(0x000205, 0.012)
+  scene.background = new THREE.Color(0x020810)
+  scene.fog = new THREE.FogExp2(0x010510, 0.006)
 
-  // Camera — perspective, angled down
-  camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500)
-  camera.position.set(18, 22, 22)
+  // Camera — SC2 style perspective angle
+  camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 500)
+  camera.position.set(20, 28, 20)
   camera.lookAt(18, 0, 18)
 
   // Controls
@@ -37,11 +37,11 @@ export function initScene(container) {
   controls.maxPolarAngle = Math.PI / 2.2
   controls.screenSpacePanning = true
 
-  // Lights
-  const ambient = new THREE.AmbientLight(0x111830, 0.6)
+  // Lights — cold blue/SC2 aesthetic
+  const ambient = new THREE.AmbientLight(0x0d1a2e, 0.7)
   scene.add(ambient)
 
-  const sun = new THREE.DirectionalLight(0x8899ff, 1.2)
+  const sun = new THREE.DirectionalLight(0x6688cc, 1.4)
   sun.position.set(40, 60, 30)
   sun.castShadow = true
   sun.shadow.camera.near = 10
@@ -53,7 +53,7 @@ export function initScene(container) {
   sun.shadow.mapSize.set(2048, 2048)
   scene.add(sun)
 
-  const rimLight = new THREE.DirectionalLight(0x002244, 0.4)
+  const rimLight = new THREE.DirectionalLight(0x001844, 0.5)
   rimLight.position.set(-20, 10, -20)
   scene.add(rimLight)
 
@@ -66,74 +66,76 @@ export function initScene(container) {
   // Grid base plane
   buildGridPlane()
 
-  // Resize
+  // Resize handler — account for bottom bar (180px) and top bar (40px)
   window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight
+    const w = container.clientWidth
+    const h = container.clientHeight
+    camera.aspect = w / h
     camera.updateProjectionMatrix()
-    renderer.setSize(window.innerWidth, window.innerHeight)
+    renderer.setSize(w, h)
   })
 
   return { renderer, scene, camera, controls }
 }
 
 function buildStarfield() {
-  const count = 4000
+  const count = 5000
   const positions = new Float32Array(count * 3)
   const sizes = new Float32Array(count)
   for (let i = 0; i < count; i++) {
     const theta = Math.random() * Math.PI * 2
     const phi = Math.acos(2 * Math.random() - 1)
-    const r = 200 + Math.random() * 100
+    const r = 200 + Math.random() * 120
     positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta)
     positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
     positions[i * 3 + 2] = r * Math.cos(phi)
-    sizes[i] = Math.random() > 0.95 ? 2.5 : 1.0
+    sizes[i] = Math.random() > 0.93 ? 2.2 : 0.9
   }
   const geo = new THREE.BufferGeometry()
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
   geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1))
 
   const mat = new THREE.PointsMaterial({
-    color: 0xffffff,
-    size: 0.8,
+    color: 0xddeeff,
+    size: 0.7,
     sizeAttenuation: true,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.9,
   })
   scene.add(new THREE.Points(geo, mat))
 }
 
 function buildNebula() {
-  // Distant colored dust clouds
-  const nebulaColors = [0x110033, 0x001133, 0x002211]
-  for (let n = 0; n < 3; n++) {
-    const count = 300
+  // Distant cold blue/purple dust clouds — SC2 feel
+  const nebulaColors = [0x0a0033, 0x001044, 0x002211, 0x001133]
+  for (let n = 0; n < 4; n++) {
+    const count = 350
     const positions = new Float32Array(count * 3)
     for (let i = 0; i < count; i++) {
-      positions[i * 3]     = (Math.random() - 0.5) * 300
-      positions[i * 3 + 1] = (Math.random() - 0.5) * 100 - 10
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 300
+      positions[i * 3]     = (Math.random() - 0.5) * 350
+      positions[i * 3 + 1] = (Math.random() - 0.5) * 120 - 10
+      positions[i * 3 + 2] = (Math.random() - 0.5) * 350
     }
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     const mat = new THREE.PointsMaterial({
       color: nebulaColors[n],
-      size: 4,
+      size: 5,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 0.15,
+      opacity: 0.12,
     })
     scene.add(new THREE.Points(geo, mat))
   }
 }
 
 function buildGridPlane() {
-  // Large dark floor
-  const geo = new THREE.PlaneGeometry(200, 200)
+  // Dark floor — SC2 dark terrain
+  const geo = new THREE.PlaneGeometry(240, 240)
   const mat = new THREE.MeshLambertMaterial({
-    color: 0x020812,
+    color: 0x020810,
     transparent: true,
-    opacity: 0.95,
+    opacity: 0.97,
   })
   const plane = new THREE.Mesh(geo, mat)
   plane.rotation.x = -Math.PI / 2
@@ -141,10 +143,10 @@ function buildGridPlane() {
   plane.receiveShadow = true
   scene.add(plane)
 
-  // Grid lines
-  const gridHelper = new THREE.GridHelper(200, 100, 0x1a4466, 0x1a4466)
+  // Grid lines — 58 cells * 2 = 116 world units, centered at 58,0,58
+  const gridHelper = new THREE.GridHelper(120, 60, 0x0d2a3d, 0x0d2a3d)
   gridHelper.position.set(58, 0, 58)
-  gridHelper.material.opacity = 0.7
+  gridHelper.material.opacity = 0.85
   gridHelper.material.transparent = true
   scene.add(gridHelper)
 }

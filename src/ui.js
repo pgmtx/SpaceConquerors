@@ -1,8 +1,26 @@
 import { state } from './state.js'
 import { getTeamColor } from './mapRenderer.js'
-import { doAction, placeModule, removeModule } from './api.js'
+import {
+  doAction, placeModule, removeModule,
+  renameShip, buildShip, getPlans,
+  getMarketOffers, buyOffer, createOffer, deleteOffer,
+  getModules,
+} from './api.js'
 
-// ── Notifications ─────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────
+function fmt(n) {
+  if (n === undefined || n === null) return '?'
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+function isShipAvailable(vaisseau) {
+  if (!vaisseau.dateProchaineAction) return true
+  return new Date(vaisseau.dateProchaineAction) <= new Date()
+}
+
+// ── Notifications ──────────────────────────────────────────────
 export function notify(msg, type = 'info') {
   const container = document.getElementById('notifications')
   const el = document.createElement('div')
@@ -12,7 +30,7 @@ export function notify(msg, type = 'info') {
   setTimeout(() => el.remove(), 3500)
 }
 
-// ── Loading progress ──────────────────────────────────────────
+// ── Loading progress ───────────────────────────────────────────
 export function setLoading(pct, status) {
   document.getElementById('loading-bar-fill').style.width = `${pct}%`
   if (status) document.getElementById('loading-status').textContent = status
@@ -25,66 +43,38 @@ export function hideLoading() {
   setTimeout(() => el.remove(), 700)
 }
 
-// ── Coordinates display ───────────────────────────────────────
+// ── Coordinates display ────────────────────────────────────────
 export function updateCoords(x, y) {
   document.getElementById('coords-display').textContent = `[ X:${x} Y:${y} ]`
 }
 
-// ── Resources & team stats ────────────────────────────────────
-export function updateTeamHUD(team) {
+// ── HUD resources & team stats ─────────────────────────────────
+export function updateHUD(team) {
   if (!team) return
 
-  document.getElementById('team-name').textContent = team.nom?.toUpperCase() || '--'
-
   const resources = team.ressources || []
-  const minerai  = resources.find(r => r.ressource?.nom === 'MINERAI')?.quantite ?? 0
+  const minerai = resources.find(r => r.ressource?.nom === 'MINERAI')?.quantite ?? 0
   const credits  = resources.find(r => r.ressource?.nom === 'CREDIT')?.quantite ?? 0
   const ships    = resources.find(r => r.ressource?.nom === 'VAISSEAU')?.quantite ?? 0
   const points   = resources.find(r => r.ressource?.nom === 'POINT')?.quantite ?? 0
 
   document.getElementById('res-minerai').textContent = fmt(minerai)
-  document.getElementById('res-credits').textContent = fmt(credits)
-  document.getElementById('res-ships').textContent = fmt(ships)
-  document.getElementById('team-score').textContent = `⭐ ${fmt(points)} pts`
-
-  // Stats bars
-  const shipCount    = (team.vaisseaux || []).length
-  const planetCount  = (team.planetes || []).length
-  const maxShips     = team.nombreSlotVaisseaux || 10
-  const maxPlanets   = 20
-  const maxCredits   = 10000
-  const maxMinerais  = 50000
-
-  setStatBar('ships',   shipCount,  maxShips,   shipCount)
-  setStatBar('planets', planetCount, maxPlanets, planetCount)
-  setStatBar('credits', credits,     maxCredits, fmt(credits))
-  setStatBar('minerai', minerai,     maxMinerais, fmt(minerai))
+  document.getElementById('res-credits').textContent  = fmt(credits)
+  document.getElementById('res-ships').textContent    = fmt(ships)
+  document.getElementById('team-score-val').textContent = fmt(points)
 }
 
-function setStatBar(id, val, max, label) {
-  const pct = Math.min(100, max > 0 ? (val / max) * 100 : 0)
-  document.getElementById(`stat-${id}-bar`).style.width = `${pct}%`
-  document.getElementById(`stat-${id}-val`).textContent = label
-}
-
-function fmt(n) {
-  if (n >= 1000000) return `${(n/1000000).toFixed(1)}M`
-  if (n >= 1000) return `${(n/1000).toFixed(1)}k`
-  return String(n)
-}
-
-// ── Leaderboard ───────────────────────────────────────────────
+// ── Leaderboard ────────────────────────────────────────────────
 export function updateLeaderboard(teams) {
   const list = document.getElementById('leaderboard-list')
   list.innerHTML = ''
 
-  // Sort by points descending
   const sorted = [...teams].sort((a, b) => {
     const pa = getPoints(a), pb = getPoints(b)
     return pb - pa
   })
 
-  sorted.slice(0, 12).forEach((team, i) => {
+  sorted.slice(0, 16).forEach((team, i) => {
     const pts = getPoints(team)
     const isMe = team.idEquipe === state.teamId
     const color = '#' + getTeamColor(team.idEquipe).toString(16).padStart(6, '0')
@@ -105,60 +95,106 @@ function getPoints(team) {
   return (team.ressources || []).find(r => r.ressource?.nom === 'POINT')?.quantite ?? 0
 }
 
-// ── Info / selection panel ────────────────────────────────────
+// ── Bottom bar portrait helpers ────────────────────────────────
+function setPortrait(icon, name, subtitle, hpPct) {
+  document.getElementById('portrait-icon').textContent = icon
+  document.getElementById('portrait-name').textContent = name || '---'
+  document.getElementById('portrait-subtitle').textContent = subtitle || ''
+
+  const fill = document.getElementById('portrait-hp-fill')
+  if (hpPct !== null && hpPct !== undefined) {
+    fill.style.width = `${Math.max(0, Math.min(100, hpPct * 100))}%`
+    fill.style.background = hpPct > 0.6 ? '#00ff66' : hpPct > 0.3 ? '#ffaa00' : '#ff3344'
+    document.getElementById('portrait-hp-bar').style.display = 'block'
+  } else {
+    document.getElementById('portrait-hp-bar').style.display = 'none'
+    fill.style.width = '100%'
+  }
+}
+
+function setStats(rows) {
+  // rows: [{key, val, cls}]
+  const container = document.getElementById('stats-content')
+  container.innerHTML = rows.map(r => `
+    <div class="stat-row">
+      <span class="stat-key">${r.key}</span>
+      <span class="stat-val${r.cls ? ' ' + r.cls : ''}">${r.val}</span>
+    </div>
+  `).join('')
+}
+
+function buildCommandCard(buttons) {
+  // buttons: [{icon, label, action, disabled, active}] — up to 12 slots in 4x3
+  const card = document.getElementById('command-card')
+  card.innerHTML = ''
+  const total = 12
+  for (let i = 0; i < total; i++) {
+    const btn = buttons[i]
+    if (!btn) {
+      const spacer = document.createElement('div')
+      spacer.className = 'cmd-btn spacer'
+      card.appendChild(spacer)
+      continue
+    }
+    const el = document.createElement('button')
+    el.className = 'cmd-btn' + (btn.active ? ' active-action' : '')
+    el.disabled = !!btn.disabled
+    el.innerHTML = `${btn.icon}<div class="cmd-label">${btn.label}</div>`
+    el.title = btn.tooltip || btn.label
+    if (btn.action) el.addEventListener('click', btn.action)
+    card.appendChild(el)
+  }
+}
+
+// ── Ship info ──────────────────────────────────────────────────
 export function showShipInfo(vaisseau) {
   if (!vaisseau) return closeInfoPanel()
 
-  document.getElementById('info-title').textContent =
-    `🚀 ${vaisseau.nom} — ${vaisseau.type?.nom || vaisseau.type?.classeVaisseau || '--'}`
-
-  const hp = vaisseau.pointDeVie ?? '?'
-  const maxHp = vaisseau.type?.pointDeVie ?? '?'
+  const hp = vaisseau.pointDeVie ?? 0
+  const maxHp = vaisseau.type?.pointDeVie ?? 1
+  const hpPct = maxHp > 0 ? hp / maxHp : 0
   const cargo = vaisseau.mineraiTransporte ?? 0
-  const capCargo = vaisseau.type?.capaciteTransport ?? '?'
-  const pos = `(${vaisseau.positionX ?? '?'}, ${vaisseau.positionY ?? '?'})`
+  const capCargo = vaisseau.type?.capaciteTransport ?? 0
   const isAvailable = isShipAvailable(vaisseau)
-  const owner = vaisseau.proprietaire === state.teamId ? 'Vous' : vaisseau.proprietaire?.substring(0, 8) + '...'
+  const isOurs = vaisseau.proprietaire === state.teamId
+  const classe = vaisseau.type?.classeVaisseau || vaisseau.type?.nom || 'VAISSEAU'
 
-  document.getElementById('info-col-1').innerHTML = `
-    <div class="info-row"><span class="info-label">HP</span>
-      <span class="info-value ${hp < maxHp * 0.3 ? 'bad' : 'good'}">${hp} / ${maxHp}</span></div>
-    <div class="info-row"><span class="info-label">Position</span>
-      <span class="info-value">${pos}</span></div>
-    <div class="info-row"><span class="info-label">Équipe</span>
-      <span class="info-value">${owner}</span></div>
-  `
-  document.getElementById('info-col-2').innerHTML = `
-    <div class="info-row"><span class="info-label">Attaque</span>
-      <span class="info-value">${vaisseau.type?.attaque ?? '?'}</span></div>
-    <div class="info-row"><span class="info-label">Cargo</span>
-      <span class="info-value">${cargo} / ${capCargo}</span></div>
-    <div class="info-row"><span class="info-label">Statut</span>
-      <span class="info-value ${isAvailable ? 'good' : 'bad'}">${isAvailable ? 'PRÊT' : 'COOLDOWN'}</span></div>
-  `
+  setPortrait('🚀', vaisseau.nom, classe, hpPct)
 
-  // Actions (only for our ships)
-  const actionsPanel = document.getElementById('actions-panel')
-  const actionsButtons = document.getElementById('actions-buttons')
-  if (vaisseau.proprietaire === state.teamId) {
-    actionsPanel.classList.add('visible')
-    actionsButtons.innerHTML = ''
-    const actions = ['DEPLACEMENT', 'RECOLTER', 'DEPOSER', 'ATTAQUER', 'CONQUERIR', 'REPARER']
-    actions.forEach(action => {
-      const btn = document.createElement('button')
-      btn.className = `action-btn${!isAvailable ? ' cooldown' : ''}`
-      btn.textContent = action
-      btn.disabled = !isAvailable
-      btn.addEventListener('click', () => handleShipAction(vaisseau, action))
-      actionsButtons.appendChild(btn)
-    })
+  const hpCls = hpPct > 0.6 ? 'good' : hpPct > 0.3 ? 'warn' : 'bad'
+  setStats([
+    { key: 'HP',      val: `${hp} / ${maxHp}`, cls: hpCls },
+    { key: 'ATK',     val: vaisseau.type?.attaque ?? '?' },
+    { key: 'POS',     val: `(${vaisseau.positionX ?? '?'}, ${vaisseau.positionY ?? '?'})` },
+    { key: 'CARGO',   val: `${cargo} / ${capCargo}` },
+    { key: 'STATUS',  val: isAvailable ? 'PRÊT' : 'COOLDOWN', cls: isAvailable ? 'good' : 'bad' },
+  ])
+
+  if (isOurs) {
+    const disabled = !isAvailable
+    buildCommandCard([
+      { icon: '🏃', label: 'DÉPLACER', disabled, active: state.pendingAction?.action === 'DEPLACEMENT',
+        action: () => setPendingAction({ action: 'DEPLACEMENT', vaisseau }) },
+      { icon: '⛏',  label: 'RÉCOLTER', disabled, active: state.pendingAction?.action === 'RECOLTER',
+        action: () => setPendingAction({ action: 'RECOLTER', vaisseau }) },
+      { icon: '📦', label: 'DÉPOSER',  disabled, active: state.pendingAction?.action === 'DEPOSER',
+        action: () => setPendingAction({ action: 'DEPOSER', vaisseau }) },
+      { icon: '⚔',  label: 'ATTAQUER', disabled, active: state.pendingAction?.action === 'ATTAQUER',
+        action: () => setPendingAction({ action: 'ATTAQUER', vaisseau }) },
+      { icon: '🏴', label: 'CONQUÉRIR', disabled, active: state.pendingAction?.action === 'CONQUERIR',
+        action: () => setPendingAction({ action: 'CONQUERIR', vaisseau }) },
+      { icon: '🔧', label: 'RÉPARER',  disabled, active: state.pendingAction?.action === 'REPARER',
+        action: () => setPendingAction({ action: 'REPARER', vaisseau }) },
+      { icon: '✏',  label: 'RENOMMER', disabled: false,
+        action: () => openRenameModal(vaisseau) },
+      null, null, null, null, null,
+    ])
   } else {
-    actionsPanel.classList.remove('visible')
+    buildCommandCard([])
   }
-
-  openInfoPanel()
 }
 
+// ── Planet info ────────────────────────────────────────────────
 let _lastPlanete = null
 
 export function refreshSelectedPlanet(mapCells) {
@@ -172,138 +208,109 @@ export function showPlanetInfo(planete) {
   _lastPlanete = planete
 
   const biome = planete.modelePlanete?.biome || '--'
-  const type = planete.modelePlanete?.typePlanete || '--'
-  const hp = planete.pointDeVie ?? '?'
-  const minerai = planete.mineraiDisponible ?? '?'
-  const slots = planete.slotsConstruction ?? '?'
-  const mods = (planete.modules || []).length
-  const hpColor = typeof hp === 'number' && hp < 30 ? 'bad' : 'good'
+  const type  = planete.modelePlanete?.typePlanete || '--'
+  const hp    = planete.pointDeVie ?? 0
+  const minerai = planete.mineraiDisponible ?? 0
+  const slots   = planete.slotsConstruction ?? 0
+  const mods    = (planete.modules || []).length
+  const hpPct   = hp / 100
+  const hpCls   = hpPct > 0.6 ? 'good' : hpPct > 0.3 ? 'warn' : 'bad'
 
-  document.getElementById('info-title').textContent = `🌍 ${planete.nom}`
+  setPortrait('🌍', planete.nom, `${type} · ${biome}`, hpPct)
 
-  document.getElementById('info-col-1').innerHTML = `
-    <div class="info-row"><span class="info-label">Type</span><span class="info-value">${type}</span></div>
-    <div class="info-row"><span class="info-label">Biome</span><span class="info-value">${biome}</span></div>
-    <div class="info-row"><span class="info-label">HP</span><span class="info-value ${hpColor}">${hp}</span></div>
-  `
-  document.getElementById('info-col-2').innerHTML = `
-    <div class="info-row"><span class="info-label">Minerai</span><span class="info-value">${fmt(minerai)}</span></div>
-    <div class="info-row"><span class="info-label">Slots</span><span class="info-value">${slots}</span></div>
-    <div class="info-row"><span class="info-label">Modules</span><span class="info-value">${mods}</span></div>
-  `
-  // Modules panel (planètes qu'on possède)
-  const actionsPanel = document.getElementById('actions-panel')
-  const actionsButtons = document.getElementById('actions-buttons')
-  const isOurs = planete.proprietaire?.idEquipe === state.teamId || planete.proprietaire === state.teamId
+  setStats([
+    { key: 'HP',      val: String(hp),          cls: hpCls },
+    { key: 'MINERAI', val: fmt(minerai) },
+    { key: 'SLOTS',   val: `${mods} / ${slots}` },
+    { key: 'MODULES', val: String(mods) },
+  ])
+
+  const isOurs = planete.proprietaire?.idEquipe === state.teamId ||
+                 planete.proprietaire === state.teamId
+
   if (isOurs) {
-    actionsPanel.classList.add('visible')
-    actionsButtons.innerHTML = ''
-    document.getElementById('actions-title').textContent = '◈ MODULES'
-    renderModulesPanel(actionsButtons, planete)
+    // Show modules inline in stats area instead of command card
+    renderModulesInStats(planete)
+
+    buildCommandCard([
+      { icon: '◈', label: 'MODULES',   action: () => renderModulesInStats(planete) },
+      { icon: '🔨', label: 'CONSTRUIRE', action: () => openShipBuilder(planete) },
+      null, null, null, null, null, null, null, null, null, null,
+    ])
   } else {
-    actionsPanel.classList.remove('visible')
+    buildCommandCard([])
   }
-  openInfoPanel()
 }
 
-function renderModulesPanel(container, planete) {
-  // Modules déjà posés sur cette planète
+function renderModulesInStats(planete) {
+  const container = document.getElementById('stats-content')
+  container.innerHTML = ''
+
   const placed = planete.modules || []
+  const available = (state.myTeam?.modules || []).filter(m => !m.idPlanete)
+
+  if (placed.length === 0 && available.length === 0) {
+    container.innerHTML = '<div style="color:#334466;font-size:10px;letter-spacing:1px;padding:6px 0;">AUCUN MODULE</div>'
+    return
+  }
+
   placed.forEach(mod => {
-    const type = mod.paramModule?.typeModule || mod.paramModule?.id || '?'
-    const btn = document.createElement('button')
-    btn.className = 'action-btn cooldown'
-    btn.textContent = `✕ ${type}`
-    btn.title = 'Retirer ce module'
-    btn.addEventListener('click', async () => {
-      btn.disabled = true
+    const typeLabel = mod.paramModule?.typeModule || '?'
+    const row = document.createElement('div')
+    row.className = 'stat-row'
+    row.style.cssText = 'cursor:pointer'
+    row.innerHTML = `
+      <span class="stat-key" style="color:#ffaa44">◈ ${typeLabel}</span>
+      <span class="stat-val bad" style="cursor:pointer" title="Retirer">✕</span>
+    `
+    row.querySelector('.stat-val').addEventListener('click', async (e) => {
+      e.stopPropagation()
       try {
         await removeModule(state.teamId, mod.id)
-        notify(`Module ${type} retiré`, 'success')
-      } catch (e) { notify(e.message, 'error') }
-      btn.disabled = false
+        notify(`Module ${typeLabel} retiré`, 'success')
+        // Refresh modules in state
+        const mods = await getModules(state.teamId)
+        if (state.myTeam) state.myTeam.modules = mods
+      } catch (err) { notify(err.message, 'error') }
     })
-    container.appendChild(btn)
+    container.appendChild(row)
   })
 
-  // Modules disponibles (non posés)
-  const available = (state.myTeam?.modules || []).filter(m => !m.idPlanete)
-  if (available.length === 0 && placed.length === 0) {
-    container.innerHTML = '<span style="color:#557799;font-size:11px">Aucun module disponible</span>'
-    return
-  }
   available.forEach(mod => {
-    const type = mod.paramModule?.typeModule || mod.paramModule?.id || '?'
-    const btn = document.createElement('button')
-    btn.className = 'action-btn'
-    btn.textContent = `+ ${type}`
-    btn.title = 'Poser ce module sur la planète'
-    btn.addEventListener('click', async () => {
-      btn.disabled = true
+    const typeLabel = mod.paramModule?.typeModule || '?'
+    const row = document.createElement('div')
+    row.className = 'stat-row'
+    row.style.cssText = 'cursor:pointer'
+    row.innerHTML = `
+      <span class="stat-key" style="color:#88aacc">+ ${typeLabel}</span>
+      <span class="stat-val good" style="cursor:pointer" title="Poser">▶</span>
+    `
+    row.querySelector('.stat-val').addEventListener('click', async (e) => {
+      e.stopPropagation()
       try {
         await placeModule(state.teamId, mod.id, planete.idPlanete)
-        notify(`Module ${type} posé !`, 'success')
-      } catch (e) { notify(e.message, 'error') }
-      btn.disabled = false
+        notify(`Module ${typeLabel} posé !`, 'success')
+        const mods = await getModules(state.teamId)
+        if (state.myTeam) state.myTeam.modules = mods
+      } catch (err) { notify(err.message, 'error') }
     })
-    container.appendChild(btn)
+    container.appendChild(row)
   })
 }
 
-function isShipAvailable(vaisseau) {
-  if (!vaisseau.dateProchaineAction) return true
-  return new Date(vaisseau.dateProchaineAction) <= new Date()
-}
-
-async function handleShipAction(vaisseau, action) {
-  if (action === 'DEPLACEMENT') {
-    notify('Clic sur la case de destination dans 3s, ou choisissez la direction', 'info')
-    // The main click handler in main.js will catch the next click as a move target
-    state.pendingAction = { action, vaisseau }
-    return
-  }
-
-  // For actions needing coordinates, use ship's current adjacent position
-  if (['RECOLTER', 'ATTAQUER', 'CONQUERIR', 'DEPOSER', 'REPARER'].includes(action)) {
-    notify(`Clic sur la cible pour ${action}`, 'info')
-    state.pendingAction = { action, vaisseau }
-    return
-  }
-
-  try {
-    await doAction(state.teamId, vaisseau.idVaisseau, action)
-    notify(`${action} effectué !`, 'success')
-  } catch (e) {
-    notify(e.message, 'error')
-  }
-}
-
-export async function executePendingAction(coord_x, coord_y) {
-  const pending = state.pendingAction
-  if (!pending) return false
-  state.pendingAction = null
-
-  try {
-    await doAction(state.teamId, pending.vaisseau.idVaisseau, pending.action, coord_x, coord_y)
-    notify(`${pending.action} → (${coord_x},${coord_y}) effectué !`, 'success')
-  } catch (e) {
-    notify(e.message, 'error')
-  }
-  return true
-}
-
-function openInfoPanel() {
-  document.getElementById('info-panel').classList.add('visible')
-}
-
+// ── Close selection ────────────────────────────────────────────
 export function closeInfoPanel() {
-  document.getElementById('info-panel').classList.remove('visible')
+  _lastPlanete = null
   state.selectedShip = null
   state.selectedPlanet = null
-  state.pendingAction = null
+  clearPendingAction()
+
+  setPortrait('◈', '---', 'AUCUNE SÉLECTION', null)
+  document.getElementById('stats-content').innerHTML = ''
+  buildCommandCard([])
 }
 
-// ── Minimap ───────────────────────────────────────────────────
+// ── Minimap ────────────────────────────────────────────────────
 let minimapCtx = null
 
 export function initMinimap() {
@@ -312,7 +319,7 @@ export function initMinimap() {
   canvas.addEventListener('click', onMinimapClick)
 }
 
-export function drawMinimap(cells, allTeamsData) {
+export function drawMinimap(cells, _allTeamsData) {
   if (!minimapCtx) return
   const canvas = minimapCtx.canvas
   const W = canvas.width, H = canvas.height
@@ -325,9 +332,9 @@ export function drawMinimap(cells, allTeamsData) {
   const cw = W / GRID, ch = H / GRID
 
   // Draw planets from state.minimapPlanets
-  state.minimapPlanets.forEach(({ x, y, ownerId, type }) => {
+  state.minimapPlanets.forEach(({ x, y, ownerId }) => {
     const px = x * cw, py = y * ch
-    const color = ownerId ? '#' + getTeamColor(ownerId).toString(16).padStart(6, '0') : '#334455'
+    const color = ownerId ? '#' + getTeamColor(ownerId).toString(16).padStart(6, '0') : '#1a2a3a'
     minimapCtx.fillStyle = color
     minimapCtx.fillRect(px, py, Math.max(2, cw), Math.max(2, ch))
   })
@@ -346,7 +353,7 @@ export function drawMinimap(cells, allTeamsData) {
   // Viewport indicator
   const vx = state.viewX * cw, vy = state.viewY * ch
   const vw = state.viewSize * cw, vh = state.viewSize * ch
-  minimapCtx.strokeStyle = 'rgba(0,255,204,0.8)'
+  minimapCtx.strokeStyle = 'rgba(0,200,255,0.8)'
   minimapCtx.lineWidth = 1
   minimapCtx.strokeRect(vx, vy, vw, vh)
 }
@@ -355,11 +362,243 @@ function onMinimapClick(e) {
   const canvas = e.target
   const rect = canvas.getBoundingClientRect()
   const fx = (e.clientX - rect.left) / canvas.width
-  const fy = (e.clientY - rect.top) / canvas.height
+  const fy = (e.clientY - rect.top)  / canvas.height
   const gx = Math.floor(fx * 58)
   const gy = Math.floor(fy * 58)
   const newX = Math.max(0, Math.min(58 - state.viewSize, gx - Math.floor(state.viewSize / 2)))
   const newY = Math.max(0, Math.min(58 - state.viewSize, gy - Math.floor(state.viewSize / 2)))
   state.viewX = newX
   state.viewY = newY
+}
+
+// ── Pending action crosshair ───────────────────────────────────
+export function setPendingAction(pending) {
+  state.pendingAction = pending
+
+  // Update command card button active states
+  if (state.selectedShip) showShipInfo(state.selectedShip)
+
+  const indicator = document.getElementById('crosshair-indicator')
+  indicator.classList.add('visible')
+  document.getElementById('crosshair-label').textContent =
+    `CIBLE POUR : ${pending.action}`
+  notify(`Cliquez sur la cible — ${pending.action}`, 'info')
+}
+
+export function clearPendingAction() {
+  state.pendingAction = null
+  document.getElementById('crosshair-indicator').classList.remove('visible')
+}
+
+export async function executePendingAction(coord_x, coord_y) {
+  const pending = state.pendingAction
+  if (!pending) return false
+  clearPendingAction()
+
+  try {
+    await doAction(state.teamId, pending.vaisseau.idVaisseau, pending.action, coord_x, coord_y)
+    notify(`${pending.action} → (${coord_x},${coord_y}) ✓`, 'success')
+  } catch (e) {
+    notify(e.message, 'error')
+  }
+  return true
+}
+
+// ── Market modal ───────────────────────────────────────────────
+export async function openMarket() {
+  const modal = document.getElementById('market-modal')
+  modal.classList.remove('hidden')
+
+  const listEl  = document.getElementById('market-list')
+  const loadEl  = document.getElementById('market-loading')
+  listEl.innerHTML = ''
+  loadEl.style.display = 'block'
+
+  // Populate sell module dropdown
+  const sellSelect = document.getElementById('sell-module-select')
+  sellSelect.innerHTML = '<option value="">-- Sélectionner un module --</option>'
+  const availMods = (state.myTeam?.modules || []).filter(m => !m.idPlanete)
+  availMods.forEach(mod => {
+    const opt = document.createElement('option')
+    opt.value = mod.id
+    opt.textContent = mod.paramModule?.typeModule || mod.id
+    sellSelect.appendChild(opt)
+  })
+
+  try {
+    const offers = await getMarketOffers()
+    loadEl.style.display = 'none'
+    listEl.innerHTML = ''
+
+    if (!offers || offers.length === 0) {
+      listEl.innerHTML = '<div style="color:#334466;font-size:11px;padding:12px 0;letter-spacing:2px;text-align:center;">AUCUNE OFFRE</div>'
+      return
+    }
+
+    offers.forEach(offer => {
+      const row = document.createElement('div')
+      row.className = 'market-offer'
+      const typeLabel = offer.module?.paramModule?.typeModule || '?'
+      const statusCls = offer.statut || 'DISPONIBLE'
+      const isOwnOffer = offer.idVendeur === state.teamId
+      const canBuy = !isOwnOffer && statusCls === 'DISPONIBLE'
+
+      row.innerHTML = `
+        <span class="offer-type">◈ ${typeLabel}</span>
+        <span class="offer-seller">${isOwnOffer ? '[ VOUS ]' : (offer.idVendeur || '?').substring(0, 8) + '...'}</span>
+        <span class="offer-price">${fmt(offer.prixVente)} cr</span>
+        <span class="offer-status ${statusCls}">${statusCls}</span>
+        ${canBuy ? `<button class="btn-buy" data-id="${offer.idOffre}">ACHETER</button>` : ''}
+        ${isOwnOffer && statusCls === 'DISPONIBLE' ? `<button class="btn-buy" data-id="${offer.idOffre}" data-cancel="1" style="color:#ff4466;border-color:rgba(255,50,70,0.4)">ANNULER</button>` : ''}
+      `
+
+      const buyBtn = row.querySelector('.btn-buy')
+      if (buyBtn) {
+        buyBtn.addEventListener('click', async () => {
+          buyBtn.disabled = true
+          try {
+            if (buyBtn.dataset.cancel) {
+              await deleteOffer(offer.idOffre)
+              notify('Offre annulée', 'success')
+            } else {
+              await buyOffer(offer.idOffre)
+              notify(`Module ${typeLabel} acheté !`, 'success')
+            }
+            await openMarket() // refresh
+          } catch (e) {
+            notify(e.message, 'error')
+            buyBtn.disabled = false
+          }
+        })
+      }
+      listEl.appendChild(row)
+    })
+  } catch (e) {
+    loadEl.style.display = 'none'
+    notify('Erreur marché: ' + e.message, 'error')
+  }
+
+  // Sell confirm button
+  const sellBtn = document.getElementById('sell-confirm-btn')
+  const newSellBtn = sellBtn.cloneNode(true)
+  sellBtn.parentNode.replaceChild(newSellBtn, sellBtn)
+  newSellBtn.addEventListener('click', async () => {
+    const modId = document.getElementById('sell-module-select').value
+    const price = parseInt(document.getElementById('sell-price-input').value, 10)
+    if (!modId) { notify('Sélectionnez un module', 'error'); return }
+    if (!price || price < 1) { notify('Prix invalide', 'error'); return }
+    newSellBtn.disabled = true
+    try {
+      await createOffer({ idModule: modId, prixVente: price })
+      notify('Offre créée !', 'success')
+      document.getElementById('sell-price-input').value = ''
+      document.getElementById('sell-module-select').value = ''
+      await openMarket()
+    } catch (e) {
+      notify(e.message, 'error')
+      newSellBtn.disabled = false
+    }
+  })
+}
+
+// ── Ship builder modal ─────────────────────────────────────────
+let _builderPlanete = null
+let _selectedPlanId = null
+
+export async function openShipBuilder(planete) {
+  _builderPlanete = planete
+  _selectedPlanId = null
+
+  const modal = document.getElementById('builder-modal')
+  modal.classList.remove('hidden')
+  document.getElementById('builder-planet-label').textContent =
+    `PLANÈTE: ${planete.nom || '?'}`
+
+  const listEl = document.getElementById('builder-list')
+  listEl.innerHTML = '<div style="color:#334466;font-size:11px;padding:12px 0;letter-spacing:2px;text-align:center;">CHARGEMENT...</div>'
+
+  try {
+    const plans = await getPlans(state.teamId)
+    listEl.innerHTML = ''
+
+    if (!plans || plans.length === 0) {
+      listEl.innerHTML = '<div style="color:#334466;font-size:11px;padding:12px 0;text-align:center;">AUCUN PLAN DISPONIBLE</div>'
+      return
+    }
+
+    plans.forEach(plan => {
+      const row = document.createElement('div')
+      row.className = 'plan-row'
+      row.dataset.planId = plan.id
+      const tv = plan.typeVaisseau || {}
+      row.innerHTML = `
+        <span class="plan-name">${plan.nom || tv.classeVaisseau || '?'}</span>
+        <div class="plan-stats">
+          <span>ATK <span>${tv.attaque ?? '?'}</span></span>
+          <span>HP <span>${tv.pointDeVie ?? '?'}</span></span>
+          <span>CARGO <span>${tv.capaciteTransport ?? '?'}</span></span>
+          <span>COÛT <span style="color:#ffcc44">${fmt(tv.coutConstruction ?? 0)}</span></span>
+        </div>
+      `
+      row.addEventListener('click', () => {
+        listEl.querySelectorAll('.plan-row').forEach(r => r.classList.remove('selected'))
+        row.classList.add('selected')
+        _selectedPlanId = plan.id
+      })
+      listEl.appendChild(row)
+    })
+  } catch (e) {
+    listEl.innerHTML = ''
+    notify('Erreur plans: ' + e.message, 'error')
+  }
+
+  // Confirm button
+  const confirmBtn = document.getElementById('builder-confirm')
+  const newConfirmBtn = confirmBtn.cloneNode(true)
+  confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn)
+  newConfirmBtn.addEventListener('click', async () => {
+    if (!_selectedPlanId) { notify('Sélectionnez un plan', 'error'); return }
+    newConfirmBtn.disabled = true
+    try {
+      await buildShip(state.teamId, { idTypePlanVaisseau: _selectedPlanId })
+      notify('Vaisseau en construction !', 'success')
+      document.getElementById('builder-modal').classList.add('hidden')
+    } catch (e) {
+      notify(e.message, 'error')
+      newConfirmBtn.disabled = false
+    }
+  })
+}
+
+// ── Rename modal ───────────────────────────────────────────────
+function openRenameModal(vaisseau) {
+  const modal = document.getElementById('rename-modal')
+  modal.classList.remove('hidden')
+  const input = document.getElementById('rename-input')
+  input.value = vaisseau.nom || ''
+  input.focus()
+  input.select()
+
+  const confirmBtn = document.getElementById('rename-confirm')
+  const newBtn = confirmBtn.cloneNode(true)
+  confirmBtn.parentNode.replaceChild(newBtn, confirmBtn)
+
+  const doRename = async () => {
+    const nom = input.value.trim()
+    if (!nom) { notify('Nom invalide', 'error'); return }
+    newBtn.disabled = true
+    try {
+      await renameShip(state.teamId, vaisseau.idVaisseau, nom)
+      notify(`Vaisseau renommé : ${nom}`, 'success')
+      vaisseau.nom = nom
+      showShipInfo(vaisseau)
+      modal.classList.add('hidden')
+    } catch (e) {
+      notify(e.message, 'error')
+      newBtn.disabled = false
+    }
+  }
+
+  newBtn.addEventListener('click', doRename)
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') doRename() })
 }
