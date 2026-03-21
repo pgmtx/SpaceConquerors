@@ -79,6 +79,11 @@ export async function renderMap(cells) {
     } else {
       // Update ownership glow on existing tile
       updateCellTile(existing.group, cell)
+      // Mettre à jour les données planète (HP, minerai, etc.)
+      if (cell.planete) {
+        const sphere = existing.group.children.find(c => c.userData.isPlanet)
+        if (sphere) sphere.userData.planete = cell.planete
+      }
       existing.cell = cell
     }
 
