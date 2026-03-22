@@ -14,6 +14,18 @@ import {
 import { getTeamColor } from "./mapRenderer.js";
 import { getPlanetOwnerId, normalizeTeamId } from "./ownership.js";
 import { state } from "./state.js";
+import { getRole, setRole, Role, getAssignedShips } from "./assignments.js";
+import { startBot, stopBot, isBotActive } from "./bot.js";
+import { startMiningBot, stopMiningBot, isMiningBotActive } from "./bot-mining.js";
+
+function syncBots() {
+  const hasAttack = getAssignedShips(Role.ATTACK).length > 0;
+  const hasMine   = getAssignedShips(Role.MINE).length > 0;
+  if (hasAttack && !isBotActive())       startBot();
+  if (!hasAttack && isBotActive())       stopBot();
+  if (hasMine && !isMiningBotActive())   startMiningBot();
+  if (!hasMine && isMiningBotActive())   stopMiningBot();
+}
 
 function fmt(value) {
   if (value === undefined || value === null || Number.isNaN(value)) {
@@ -318,6 +330,40 @@ export function showShipInfo(ship) {
       icon: "✏",
       label: "Renommer",
       action: () => openRenameModal(ship)
+    },
+    null,
+    {
+      icon: "⚔",
+      label: "Auto-Attaque",
+      tooltip: "Automatique : attaque et conquiert les planètes ennemies",
+      active: getRole(ship.idVaisseau) === Role.ATTACK,
+      action: () => {
+        setRole(ship.idVaisseau, Role.ATTACK);
+        syncBots();
+        showShipInfo(ship);
+      }
+    },
+    {
+      icon: "⛏",
+      label: "Auto-Minage",
+      tooltip: "Automatique : mine les planètes et dépose les ressources",
+      active: getRole(ship.idVaisseau) === Role.MINE,
+      action: () => {
+        setRole(ship.idVaisseau, Role.MINE);
+        syncBots();
+        showShipInfo(ship);
+      }
+    },
+    {
+      icon: "💤",
+      label: "Inactif",
+      tooltip: "Contrôle manuel uniquement",
+      active: getRole(ship.idVaisseau) === Role.IDLE,
+      action: () => {
+        setRole(ship.idVaisseau, Role.IDLE);
+        syncBots();
+        showShipInfo(ship);
+      }
     }
   ]);
 }
