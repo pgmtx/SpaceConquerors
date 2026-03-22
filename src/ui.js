@@ -283,12 +283,16 @@ export function showShipInfo(ship) {
     return;
   }
 
+  const navigating = isNavigating(ship.idVaisseau);
+
   buildCommandCard([
     {
-      icon: "🏃",
-      label: "Déplacer",
-      active: state.pendingAction?.action === "DEPLACEMENT",
-      action: () => setPendingAction({ action: "DEPLACEMENT", vaisseau: ship })
+      icon: navigating ? "🛑" : "🏃",
+      label: navigating ? "Stop nav." : "Déplacer",
+      active: navigating || state.pendingAction?.action === "DEPLACEMENT",
+      action: navigating
+        ? () => { cancelNavigation(ship.idVaisseau); showShipInfo(ship); }
+        : () => setPendingAction({ action: "DEPLACEMENT", vaisseau: ship })
     },
     {
       icon: "⛏",
@@ -706,6 +710,114 @@ function onMinimapClick(event) {
   state.actions.refreshMap?.();
 }
 
+// ── Navigation automatique ────────────────────────────────────
+const MAP_SIZE_NAV = 58;
+const activeNavigations = new Map(); // shipId → { cancelled: bool }
+
+function navSleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function buildNavObstacles() {
+  const obs = new Set();
+  for (const cell of state.mapCells) {
+    const type = cell.planete?.modelePlanete?.typePlanete;
+    if (type && type !== "VIDE") obs.add(`${cell.coord_x}_${cell.coord_y}`);
+  }
+  return obs;
+}
+
+function navBfsNextStep(sx, sy, tx, ty, obstacles) {
+  if (sx === tx && sy === ty) return null;
+  const start = `${sx}_${sy}`;
+  const target = `${tx}_${ty}`;
+  const parent = new Map([[start, null]]);
+  const queue = [{ x: sx, y: sy }];
+  while (queue.length) {
+    const { x, y } = queue.shift();
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || nx >= MAP_SIZE_NAV || ny < 0 || ny >= MAP_SIZE_NAV) continue;
+        const nk = `${nx}_${ny}`;
+        if (parent.has(nk)) continue;
+        if (obstacles.has(nk) && nk !== target) continue;
+        parent.set(nk, `${x}_${y}`);
+        if (nk === target) {
+          let cur = nk;
+          while (parent.get(cur) !== start) cur = parent.get(cur);
+          const [fx, fy] = cur.split("_").map(Number);
+          return { x: fx, y: fy };
+        }
+        queue.push({ x: nx, y: ny });
+      }
+    }
+  }
+  return null;
+}
+
+export function isNavigating(shipId) {
+  return activeNavigations.has(shipId);
+}
+
+export function cancelNavigation(shipId) {
+  const nav = activeNavigations.get(shipId);
+  if (nav) nav.cancelled = true;
+  activeNavigations.delete(shipId);
+}
+
+async function startNavigation(ship, targetX, targetY) {
+  const shipId = ship.idVaisseau;
+  cancelNavigation(shipId);
+
+  const nav = { cancelled: false };
+  activeNavigations.set(shipId, nav);
+
+  notify(`Navigation vers (${targetX}, ${targetY})…`, "info");
+  if (state.selectedShip?.idVaisseau === shipId) showShipInfo(state.selectedShip);
+
+  let cx = ship.positionX;
+  let cy = ship.positionY;
+
+  while (cx !== targetX || cy !== targetY) {
+    if (nav.cancelled) { notify("Navigation annulée", "info"); return; }
+
+    const step = navBfsNextStep(cx, cy, targetX, targetY, buildNavObstacles());
+    if (!step) {
+      notify(`Navigation bloquée en (${cx}, ${cy})`, "error");
+      break;
+    }
+
+    try {
+      await doAction(state.teamId, shipId, "DEPLACEMENT", step.x, step.y);
+      cx = step.x;
+      cy = step.y;
+    } catch (e) {
+      notify(`Navigation interrompue : ${e.message}`, "error");
+      break;
+    }
+
+    if (nav.cancelled) { notify("Navigation annulée", "info"); return; }
+
+    await state.actions.fullSync?.();
+    if (state.selectedShip?.idVaisseau === shipId) showShipInfo(state.selectedShip);
+
+    // Attendre la fin du cooldown
+    const updated = state.myTeam?.vaisseaux?.find(s => s.idVaisseau === shipId);
+    if (updated?.dateProchaineAction) {
+      const wait = new Date(updated.dateProchaineAction) - Date.now();
+      if (wait > 0) await navSleep(wait + 300);
+    }
+  }
+
+  if (!nav.cancelled) {
+    notify(`Arrivée en (${targetX}, ${targetY})`, "success");
+  }
+  activeNavigations.delete(shipId);
+  if (state.selectedShip?.idVaisseau === shipId) showShipInfo(state.selectedShip);
+}
+
 export function setPendingAction(pendingAction) {
   state.pendingAction = pendingAction;
   document.getElementById("crosshair-indicator").classList.add("visible");
@@ -728,6 +840,16 @@ export async function executePendingAction(coordX, coordY) {
   }
 
   clearPendingAction();
+
+  // Navigation automatique si la cible est hors de portée directe
+  if (pendingAction.action === "DEPLACEMENT") {
+    const ship = pendingAction.vaisseau;
+    const dist = Math.max(Math.abs(ship.positionX - coordX), Math.abs(ship.positionY - coordY));
+    if (dist > 1) {
+      startNavigation(ship, coordX, coordY);
+      return true;
+    }
+  }
 
   try {
     const response = await doAction(
