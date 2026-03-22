@@ -221,12 +221,24 @@ async function fullScan() {
 // ── Sélection de cible ────────────────────────────────────────
 function getBestTarget(shipX, shipY, myShipId) {
     const myId = state.teamId;
+
+    // Positions de nos propres planètes (depuis l'état global, toujours à jour)
+    const myPlanets = (state.myTeam?.planetes ?? [])
+        .map(p => ({ x: p.coord_x ?? p.x, y: p.coord_y ?? p.y }))
+        .filter(p => p.x !== undefined);
+
+    // Clés de nos planètes pour exclusion fiable même si le cache est en retard
+    const myPlanetKeys = new Set(myPlanets.map(p => `${p.x}_${p.y}`));
+
     let best = null;
     let bestScore = Infinity;
 
     for (const [key, planet] of planetCache) {
         if (skippedPlanets.has(key)) continue;
-        if (planet.ownerId === myId) continue;
+        // Exclure nos propres planètes (cache + état courant)
+        if (myPlanetKeys.has(key)) continue;
+        // Uniquement les planètes sans propriétaire
+        if (planet.ownerId !== null && planet.ownerId !== undefined) continue;
         if (planet.x === shipX && planet.y === shipY) continue;
         if (planet.immune) continue;
         if ((planet.stuckCount ?? 0) >= STUCK_THRESHOLD) {
@@ -237,9 +249,13 @@ function getBestTarget(shipX, shipY, myShipId) {
         const claimer = claimedTargets.get(key);
         if (claimer && claimer !== myShipId) continue;
 
-        const d = chebyshevDist(shipX, shipY, planet.x, planet.y);
-        // Score = distance pure : la planète la plus proche gagne
-        const score = d;
+        // Score = distance au vaisseau + distance minimale depuis une de nos planètes
+        const distShip = chebyshevDist(shipX, shipY, planet.x, planet.y);
+        const distTerritory = myPlanets.length > 0
+            ? Math.min(...myPlanets.map(p => chebyshevDist(p.x, p.y, planet.x, planet.y)))
+            : distShip;
+        const score = distShip + distTerritory;
+
         if (score < bestScore) {
             bestScore = score;
             best = { key, ...planet };
@@ -326,31 +342,33 @@ async function tickShip(ship) {
             const cx = enemies.reduce((s, e) => s + e.x, 0) / enemies.length;
             const cy = enemies.reduce((s, e) => s + e.y, 0) / enemies.length;
 
-            // Parmi les 8 cases adjacentes, choisir celle qui maximise la distance au centroïde
-            let bestFlee = null;
-            let bestDist = -1;
+            // Trier les 8 cases adjacentes par distance décroissante au centroïde
+            const fleeCandidates = [];
             for (let dx = -1; dx <= 1; dx++) {
                 for (let dy = -1; dy <= 1; dy++) {
                     if (!dx && !dy) continue;
                     const nx = sx + dx, ny = sy + dy;
                     if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
-                    const nkey = `${nx}_${ny}`;
-                    if (planetCache.has(nkey)) continue; // éviter les planètes
+                    if (planetCache.has(`${nx}_${ny}`)) continue;
+                    if (enemyCache.has(`${nx}_${ny}`)) continue;
                     const dist = chebyshevDist(nx, ny, Math.round(cx), Math.round(cy));
-                    if (dist > bestDist) { bestDist = dist; bestFlee = { x: nx, y: ny }; }
+                    fleeCandidates.push({ x: nx, y: ny, dist });
                 }
             }
+            fleeCandidates.sort((a, b) => b.dist - a.dist);
 
-            if (bestFlee) {
-                log(ship.nom, `🏃 FUIR vers (${bestFlee.x},${bestFlee.y}) loin de centroïde (${Math.round(cx)},${Math.round(cy)})`);
+            let fled = false;
+            for (const cell of fleeCandidates) {
+                log(ship.nom, `🏃 FUIR vers (${cell.x},${cell.y})`);
                 try {
-                    await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", bestFlee.x, bestFlee.y);
+                    await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", cell.x, cell.y);
+                    fled = true;
+                    break;
                 } catch (e) {
-                    log(ship.nom, `✗ Fuite échouée : ${e.message}`);
+                    log(ship.nom, `✗ (${cell.x},${cell.y}) bloquée : ${e.message}`);
                 }
-            } else {
-                log(ship.nom, "Aucune case de fuite disponible");
             }
+            if (!fled) log(ship.nom, "Aucune case de fuite disponible");
             break;
         }
 
