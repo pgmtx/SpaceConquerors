@@ -18,6 +18,7 @@ import { state } from "./state.js";
 import {
   cancelAttack,
   cancelNavigation,
+  cancelShipAction,
   clearPendingAction,
   closeInfoPanel,
   drawMinimap,
@@ -1386,6 +1387,7 @@ function registerInput() {
       if (state.selectedShip?.idVaisseau) {
         cancelAttack(state.selectedShip.idVaisseau);
         cancelNavigation(state.selectedShip.idVaisseau);
+        cancelShipAction(state.selectedShip.idVaisseau);
       }
       if (state.movementPlan) {
         clearMovementPlan("Trajet annulé", "info");

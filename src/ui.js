@@ -288,6 +288,8 @@ export function showShipInfo(ship) {
 
   const navigating = isNavigating(ship.idVaisseau);
   const attacking = isAttacking(ship.idVaisseau);
+  const harvesting = isShipActionRunning(ship.idVaisseau, "RECOLTER");
+  const depositing = isShipActionRunning(ship.idVaisseau, "DEPOSER");
 
   buildCommandCard([
     {
@@ -299,18 +301,22 @@ export function showShipInfo(ship) {
         : () => setPendingAction({ action: "DEPLACEMENT", vaisseau: ship })
     },
     {
-      icon: "⛏",
-      label: "Récolter",
-      disabled: !available,
-      active: state.pendingAction?.action === "RECOLTER",
-      action: () => setPendingAction({ action: "RECOLTER", vaisseau: ship })
+      icon: harvesting ? "🛑" : "⛏",
+      label: harvesting ? "Stop rec." : "Récolter",
+      disabled: !available && !harvesting,
+      active: harvesting || state.pendingAction?.action === "RECOLTER",
+      action: harvesting
+        ? () => { cancelShipAction(ship.idVaisseau, "RECOLTER"); showShipInfo(ship); }
+        : () => setPendingAction({ action: "RECOLTER", vaisseau: ship })
     },
     {
-      icon: "📦",
-      label: "Déposer",
-      disabled: !available,
-      active: state.pendingAction?.action === "DEPOSER",
-      action: () => setPendingAction({ action: "DEPOSER", vaisseau: ship })
+      icon: depositing ? "🛑" : "📦",
+      label: depositing ? "Stop dep." : "Déposer",
+      disabled: !available && !depositing,
+      active: depositing || state.pendingAction?.action === "DEPOSER",
+      action: depositing
+        ? () => { cancelShipAction(ship.idVaisseau, "DEPOSER"); showShipInfo(ship); }
+        : () => setPendingAction({ action: "DEPOSER", vaisseau: ship })
     },
     {
       icon: attacking ? "🛑" : "⚔",
@@ -721,6 +727,7 @@ const MAP_SIZE_NAV = 58;
 const NAV_STEP_INTERVAL_MS = 2000;
 const NAV_RETRY_DELAY_MS = 3000;
 const ATTACK_RETRY_DELAY_MS = 12000;
+const SHIP_ACTION_RETRY_DELAY_MS = 9000;
 const NAV_DIRECTIONS = [
   { dx: 1, dy: 0 },
   { dx: -1, dy: 0 },
@@ -729,6 +736,7 @@ const NAV_DIRECTIONS = [
 ];
 const activeNavigations = new Map();
 const activeAttacks = new Map();
+const activeShipActions = new Map();
 
 function navSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -979,6 +987,14 @@ export function isAttacking(shipId) {
   return activeAttacks.has(shipId);
 }
 
+function getShipActionKey(shipId, action) {
+  return `${action}:${shipId}`;
+}
+
+export function isShipActionRunning(shipId, action) {
+  return activeShipActions.has(getShipActionKey(shipId, action));
+}
+
 export function cancelNavigation(shipId) {
   const nav = activeNavigations.get(shipId);
   if (nav) {
@@ -993,6 +1009,26 @@ export function cancelAttack(shipId) {
     attack.cancelled = true;
   }
   activeAttacks.delete(shipId);
+}
+
+export function cancelShipAction(shipId, action = null) {
+  if (action) {
+    const entry = activeShipActions.get(getShipActionKey(shipId, action));
+    if (entry) {
+      entry.cancelled = true;
+    }
+    activeShipActions.delete(getShipActionKey(shipId, action));
+    return;
+  }
+
+  activeShipActions.forEach((entry, key) => {
+    if (!key.endsWith(`:${shipId}`)) {
+      return;
+    }
+
+    entry.cancelled = true;
+    activeShipActions.delete(key);
+  });
 }
 
 export async function runNavigationLoop(ship, targetX, targetY, options = {}) {
@@ -1212,6 +1248,150 @@ export async function runAttackLoop(ship, targetX, targetY, options = {}) {
   return destroyedTarget;
 }
 
+function getShipActionLabel(action) {
+  switch (action) {
+    case "RECOLTER":
+      return "Récolte";
+    case "DEPOSER":
+      return "Dépôt";
+    default:
+      return action;
+  }
+}
+
+function getResourceActionCell(coordX, coordY) {
+  const cell = getNavigationCell(coordX, coordY);
+  if (!cell?.planete || cell.planete.modelePlanete?.typePlanete === "VIDE") {
+    return null;
+  }
+
+  return cell;
+}
+
+export async function runShipActionLoop(ship, action, targetX, targetY, options = {}) {
+  const shipId = ship?.idVaisseau;
+  if (!shipId) {
+    return false;
+  }
+
+  const actionKey = getShipActionKey(shipId, action);
+  const notifyUser = options.notifyUser !== false;
+  const actionLabel = getShipActionLabel(action);
+  let actionSucceeded = false;
+
+  cancelShipAction(shipId, action);
+
+  const task = {
+    cancelled: false,
+    targetX,
+    targetY,
+    lastFailureKey: ""
+  };
+  activeShipActions.set(actionKey, task);
+
+  if (notifyUser) {
+    notify(`${actionLabel} en boucle sur (${targetX}, ${targetY})...`, "info");
+  }
+  refreshNavigationSelection(shipId);
+
+  try {
+    await syncNavigationState();
+
+    while (!task.cancelled) {
+      const currentShip = getNavigationShip(shipId) || ship;
+      if (!currentShip) {
+        if (notifyUser) {
+          notify(`${actionLabel} annulée : vaisseau introuvable`, "error");
+        }
+        break;
+      }
+
+      if ((currentShip.pointDeVie ?? 1) <= 0) {
+        if (notifyUser) {
+          notify(`${actionLabel} annulée : vaisseau détruit`, "error");
+        }
+        break;
+      }
+
+      const targetCell = getResourceActionCell(targetX, targetY);
+      if (!targetCell) {
+        if (notifyUser) {
+          notify(`${actionLabel} annulée : cible introuvable`, "error");
+        }
+        break;
+      }
+
+      if (action === "RECOLTER" && Number(targetCell.planete.mineraiDisponible ?? 0) <= 0) {
+        actionSucceeded = true;
+        if (notifyUser) {
+          notify(`Récolte terminée sur (${targetX}, ${targetY})`, "success");
+        }
+        break;
+      }
+
+      if (action === "DEPOSER" && Number(currentShip.mineraiTransporte ?? 0) <= 0) {
+        actionSucceeded = true;
+        if (notifyUser) {
+          notify(`Dépôt terminé sur (${targetX}, ${targetY})`, "success");
+        }
+        break;
+      }
+
+      const waitMs = getNavigationDelay(currentShip);
+      if (waitMs > 0) {
+        await navSleep(waitMs);
+        await syncNavigationState();
+        refreshNavigationSelection(shipId);
+        continue;
+      }
+
+      try {
+        const response = await doAction(state.teamId, shipId, action, targetX, targetY);
+        if (isActionResponseFailure(response)) {
+          throw new Error(response?.message || "Action refusée");
+        }
+
+        actionSucceeded = true;
+        task.lastFailureKey = "";
+        await syncNavigationState();
+        refreshNavigationSelection(shipId);
+
+        if (notifyUser) {
+          notify(`${actionLabel} réussie sur (${targetX}, ${targetY})`, "success");
+        }
+        break;
+      } catch (error) {
+        const failureKey = `${action}_${targetX}_${targetY}_${error.message}`;
+        if (notifyUser && task.lastFailureKey !== failureKey) {
+          notify(`${actionLabel} refusée sur (${targetX}, ${targetY}) : ${error.message}`, "error");
+          task.lastFailureKey = failureKey;
+        }
+
+        await navSleep(SHIP_ACTION_RETRY_DELAY_MS);
+        await syncNavigationState();
+        refreshNavigationSelection(shipId);
+      }
+    }
+  } catch (error) {
+    if (notifyUser) {
+      notify(`${actionLabel} interrompue : ${error.message}`, "error");
+    }
+  } finally {
+    activeShipActions.delete(actionKey);
+    refreshNavigationSelection(shipId);
+  }
+
+  return actionSucceeded;
+}
+
+export async function runHarvestLoop(ship, targetX, targetY, options = {}) {
+  return runShipActionLoop(ship, "RECOLTER", targetX, targetY, options);
+}
+
+export async function runDepositLoop(ship, targetX, targetY, options = {}) {
+  return runShipActionLoop(ship, "DEPOSER", targetX, targetY, options);
+}
+
 export function setPendingAction(pendingAction) {
   state.pendingAction = pendingAction;
   document.getElementById("crosshair-indicator").classList.add("visible");
@@ -1248,6 +1428,16 @@ export async function executePendingAction(coordX, coordY) {
 
   if (pendingAction.action === "ATTAQUER") {
     runAttackLoop(pendingAction.vaisseau, coordX, coordY);
+    return true;
+  }
+
+  if (pendingAction.action === "RECOLTER") {
+    runHarvestLoop(pendingAction.vaisseau, coordX, coordY);
+    return true;
+  }
+
+  if (pendingAction.action === "DEPOSER") {
+    runDepositLoop(pendingAction.vaisseau, coordX, coordY);
     return true;
   }
 

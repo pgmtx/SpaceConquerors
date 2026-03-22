@@ -3,7 +3,7 @@
 
 import { doAction, getShips, getMap } from "./api.js";
 import { state } from "./state.js";
-import { notify } from "./ui.js";
+import { notify, runDepositLoop, runHarvestLoop } from "./ui.js";
 import { getRole, setRole, Role } from "./assignments.js";
 
 const TICK_MS  = 3_000;
@@ -165,8 +165,10 @@ async function tickShip(ship) {
         if (isAdj(sx, sy, dx, dy)) {
             log(ship.nom, `💰 DEPOSER (${dx},${dy})`);
             try {
-                await act(state.teamId, id, "DEPOSER", dx, dy);
-                notify(`[Mine] ${ship.nom} → dépôt !`, "success");
+                const deposited = await runDepositLoop(ship, dx, dy, { notifyUser: false });
+                if (deposited) {
+                    notify(`[Mine] ${ship.nom} → dépôt !`, "success");
+                }
             } catch (e) {
                 log(ship.nom, `✗ DEPOSER : ${e.message}`);
             }
@@ -190,8 +192,10 @@ async function tickShip(ship) {
     if (isAdj(sx, sy, target.x, target.y)) {
         log(ship.nom, `⛏ RECOLTER (${target.x},${target.y})`);
         try {
-            const r = await act(state.teamId, id, "RECOLTER", target.x, target.y);
-            log(ship.nom, `✓ minerai récolté`);
+            const harvested = await runHarvestLoop(ship, target.x, target.y, { notifyUser: false });
+            if (harvested) {
+                log(ship.nom, `✓ minerai récolté`);
+            }
         } catch (e) {
             log(ship.nom, `✗ RECOLTER : ${e.message}`);
         }
