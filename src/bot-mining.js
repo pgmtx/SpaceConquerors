@@ -1,7 +1,7 @@
 // Bot minier — trouver planète proche → RECOLTER → DEPOSER sur planète avec module déchargement
 // Si aucune planète disponible, passe en mode ATTACK.
 
-import { doAction, getShips, getMap, getTeam } from "./api.js";
+import { doAction, getShips, getMap } from "./api.js";
 import { state } from "./state.js";
 import { notify } from "./ui.js";
 import { getRole, setRole, Role } from "./assignments.js";
@@ -108,48 +108,28 @@ function nextStep(sx, sy, tx, ty, obstacles) {
     return null;
 }
 
-// ── Dépôt ─────────────────────────────────────────────────────
-let depotPos = null;
-
-async function findDepot() {
-    try {
-        const team = await getTeam(state.teamId);
-        const planetes = team.planetes ?? [];
-        if (!planetes.length) {
-            log("DEPOT", "Aucune planète — pas de dépôt");
-            return;
-        }
-        for (const p of planetes) {
-            const hasUnload = (p.modules ?? []).some(
-                m => m.paramModule?.typeModule === 'DECHARGEMENT_RESSOURCE'
-            );
-            if (!hasUnload) continue;
-            if (p.coord_x !== undefined) {
-                depotPos = { x: p.coord_x, y: p.coord_y, id: p.identifiant };
-                log("DEPOT", `Trouvé (${depotPos.x},${depotPos.y})`);
-                return;
-            }
-            if (p.identifiant) depotPos = { id: p.identifiant, x: null, y: null };
-        }
-        // Pas de module déchargement → utiliser n'importe quelle planète à nous
-        if (!depotPos && planetes.length) {
-            const p = planetes[0];
-            if (p.coord_x !== undefined) {
-                depotPos = { x: p.coord_x, y: p.coord_y, id: p.identifiant };
-                log("DEPOT", `Pas de module déchargement, utilise (${depotPos.x},${depotPos.y})`);
-            }
-        }
-    } catch (e) { log("DEPOT", e.message); }
+// ── Récupère nos planètes depuis l'état global ────────────────
+// Retourne les planètes avec coordonnées (coord_x/coord_y ou x/y selon la source)
+function getMyPlanets() {
+    return (state.myTeam?.planetes ?? []).filter(
+        p => p.coord_x !== undefined || p.x !== undefined
+    ).map(p => ({
+        id: p.identifiant,
+        x: p.coord_x ?? p.x,
+        y: p.coord_y ?? p.y,
+        modules: p.modules ?? [],
+        minerai: p.mineraiDisponible ?? null,
+    }));
 }
 
-function resolveDepot(planets) {
-    if (!depotPos || depotPos.x !== null) return;
-    const found = planets.find(p => p.identifiant === depotPos.id);
-    if (found) {
-        depotPos.x = found.x;
-        depotPos.y = found.y;
-        log("DEPOT", `Résolu : (${depotPos.x},${depotPos.y})`);
-    }
+function findDepotFromPlanets(myPlanets) {
+    // Préférer une planète avec module DECHARGEMENT_RESSOURCE
+    const withModule = myPlanets.find(p =>
+        p.modules.some(m => m.paramModule?.typeModule === 'DECHARGEMENT_RESSOURCE')
+    );
+    if (withModule) return withModule;
+    // Sinon n'importe laquelle
+    return myPlanets[0] ?? null;
 }
 
 // ── Tick d'un vaisseau ────────────────────────────────────────
@@ -159,16 +139,29 @@ async function tickShip(ship) {
     if (sx === undefined) return;
 
     const cargo = ship.mineraiTransporte ?? 0;
-    log(ship.nom, `pos=(${sx},${sy}) cargo=${cargo}`);
+    const myPlanets = getMyPlanets();
+    log(ship.nom, `pos=(${sx},${sy}) cargo=${cargo} planètes=${myPlanets.length}`);
 
-    const planets = await scanPlanets(sx, sy, 9);
-    resolveDepot(planets);
+    // Aucune planète à nous → basculer en ATTACK
+    if (!myPlanets.length) {
+        log(ship.nom, "Aucune planète à nous → bascule ATTACK");
+        setRole(id, Role.ATTACK);
+        notify(`[Mine] ${ship.nom} : aucune planète → ATTAQUE`, "info");
+        return;
+    }
 
-    const obstacles = new Set(planets.map(p => p.key));
+    // Calculer obstacles (toutes les planètes connues, scan local)
+    const scanned = await scanPlanets(sx, sy, 9);
+    const obstacles = new Set(scanned.map(p => `${p.x}_${p.y}`));
 
-    // Si cargo > 0 et dépôt connu → déposer
-    if (cargo > 0 && depotPos !== null && depotPos.x !== null) {
-        const dx = depotPos.x, dy = depotPos.y;
+    // Si cargo > 0 → aller déposer
+    if (cargo > 0) {
+        const depot = findDepotFromPlanets(myPlanets);
+        if (!depot) {
+            log(ship.nom, "Aucun dépôt disponible");
+            return;
+        }
+        const { x: dx, y: dy } = depot;
         if (isAdj(sx, sy, dx, dy)) {
             log(ship.nom, `💰 DEPOSER (${dx},${dy})`);
             try {
@@ -176,7 +169,6 @@ async function tickShip(ship) {
                 notify(`[Mine] ${ship.nom} → dépôt !`, "success");
             } catch (e) {
                 log(ship.nom, `✗ DEPOSER : ${e.message}`);
-                depotPos = null;
             }
         } else {
             const step = nextStep(sx, sy, dx, dy, obstacles);
@@ -189,25 +181,8 @@ async function tickShip(ship) {
         return;
     }
 
-    // Trouver planète avec minerai
-    const myId = state.teamId;
-    const candidates = planets.filter(p => {
-        if (depotPos?.x === p.x && depotPos?.y === p.y) return false;
-        // Préférer nos planètes avec minerai, sinon planètes voisines quelconques
-        if (p.ownerId === myId) return p.minerai === null || p.minerai > 0;
-        return p.minerai === null || p.minerai > 0;
-    });
-
-    if (!candidates.length) {
-        // Aucune planète visible → basculer en ATTACK
-        log(ship.nom, "Aucune ressource → bascule ATTACK");
-        setRole(id, Role.ATTACK);
-        notify(`[Mine] ${ship.nom} : aucune ressource → ATTAQUE`, "info");
-        return;
-    }
-
-    // Planète la plus proche
-    const target = candidates.reduce((best, p) => {
+    // Trouver la planète à nous la plus proche pour miner
+    const target = myPlanets.reduce((best, p) => {
         const d = chebyshev(sx, sy, p.x, p.y);
         return d < chebyshev(sx, sy, best.x, best.y) ? p : best;
     });
@@ -216,7 +191,7 @@ async function tickShip(ship) {
         log(ship.nom, `⛏ RECOLTER (${target.x},${target.y})`);
         try {
             const r = await act(state.teamId, id, "RECOLTER", target.x, target.y);
-            log(ship.nom, `✓ +${r?.ressource ?? "?"} minerai`);
+            log(ship.nom, `✓ minerai récolté`);
         } catch (e) {
             log(ship.nom, `✗ RECOLTER : ${e.message}`);
         }
@@ -250,11 +225,9 @@ async function mineTick() {
 }
 
 // ── API publique ──────────────────────────────────────────────
-export async function startMiningBot() {
+export function startMiningBot() {
     if (mineActive) return;
     mineActive = true;
-    notify("[Mine] Démarrage...", "info");
-    await findDepot();
     mineInterval = setInterval(mineTick, TICK_MS);
     notify("[Mine] Actif ✓", "info");
 }
