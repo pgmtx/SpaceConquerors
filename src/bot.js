@@ -1,6 +1,6 @@
 // Bot d'automatisation des vaisseaux — mode Attaque/Conquête
-// Stratégie : cibler les planètes ennemies par HP croissant, attaquer, puis conquérir
-// Reste éloigné des vaisseaux ennemis.
+// Stratégie : cibler la planète non-possédée la plus proche, attaquer, puis conquérir.
+// Si un vaisseau ennemi est trop proche, s'éloigner d'abord.
 
 import { doAction, getShips, getMap } from "./api.js";
 import { state } from "./state.js";
@@ -12,8 +12,8 @@ const TICK_MS               = 3_000;
 const CHUNK                 = 18;
 const MAP_SIZE              = 58;
 const STUCK_THRESHOLD       = 3;
-const DIST_WEIGHT           = 0.3;
 const FULL_SCAN_COOLDOWN_MS = 60_000;
+const DANGER_RADIUS         = 4;   // Cases autour du vaisseau → fuite si ennemi dedans
 
 const Phase = Object.freeze({
     SEARCH:       "SEARCH",
@@ -21,6 +21,7 @@ const Phase = Object.freeze({
     ATTACK:       "ATTACK",
     WAIT_CONQUER: "WAIT_CONQUER",
     CONQUER:      "CONQUER",
+    FLEE:         "FLEE",
 });
 
 // ── Cache planètes ─────────────────────────────────────────────
@@ -32,9 +33,7 @@ const claimedTargets = new Map(); // key → shipId
 // ── Cache vaisseaux ennemis ────────────────────────────────────
 // Clé "x_y" → { x, y, teamId, lastSeen }
 const enemyCache = new Map();
-const ENEMY_STALE_MS    = 10_000;
-const ENEMY_RISK_RADIUS = 3;
-const ENEMY_RISK_PENALTY = 200;
+const ENEMY_STALE_MS = 10_000;
 
 // ── Cases réservées par les vaisseaux alliés ce tick ─────────
 const reservedCells = new Set();
@@ -239,14 +238,8 @@ function getBestTarget(shipX, shipY, myShipId) {
         if (claimer && claimer !== myShipId) continue;
 
         const d = chebyshevDist(shipX, shipY, planet.x, planet.y);
-        let enemyRisk = 0;
-        for (const enemy of enemyCache.values()) {
-            if (chebyshevDist(enemy.x, enemy.y, planet.x, planet.y) <= ENEMY_RISK_RADIUS) {
-                enemyRisk += ENEMY_RISK_PENALTY;
-                break;
-            }
-        }
-        const score = planet.hp + d * DIST_WEIGHT + enemyRisk;
+        // Score = distance pure : la planète la plus proche gagne
+        const score = d;
         if (score < bestScore) {
             bestScore = score;
             best = { key, ...planet };
@@ -287,7 +280,22 @@ async function tickShip(ship) {
 
     log(ship.nom, `[phase=${ss.phase}] pos=(${sx},${sy}) cible=${ss.target?.key ?? "—"}`);
 
-    if (ss.target) {
+    // ── Vérification danger ───────────────────────────────────
+    // Si un ennemi est à portée DANGER_RADIUS, interrompre et fuir
+    const nearbyEnemies = [...enemyCache.values()].filter(
+        e => chebyshevDist(sx, sy, e.x, e.y) <= DANGER_RADIUS
+    );
+    if (nearbyEnemies.length > 0) {
+        if (ss.phase !== Phase.FLEE) {
+            log(ship.nom, `⚠ Ennemi(s) à portée, passage en FLEE`);
+            ss.phase = Phase.FLEE;
+        }
+    } else if (ss.phase === Phase.FLEE) {
+        log(ship.nom, `✓ Zone dégagée, retour en SEARCH`);
+        abandonTarget(id, ss);
+    }
+
+    if (ss.target && ss.phase !== Phase.FLEE) {
         const cached = planetCache.get(ss.target.key);
         if (cached) {
             ss.target.hp = cached.hp;
@@ -300,6 +308,51 @@ async function tickShip(ship) {
     }
 
     switch (ss.phase) {
+
+        case Phase.FLEE: {
+            // Scanner pour avoir des infos fraîches sur les ennemis
+            await scanAroundShip(sx, sy, 6);
+
+            const enemies = [...enemyCache.values()].filter(
+                e => chebyshevDist(sx, sy, e.x, e.y) <= DANGER_RADIUS
+            );
+            if (!enemies.length) {
+                log(ship.nom, `✓ Zone dégagée, retour en SEARCH`);
+                abandonTarget(id, ss);
+                break;
+            }
+
+            // Calcul du centroïde ennemi pour fuir dans la direction opposée
+            const cx = enemies.reduce((s, e) => s + e.x, 0) / enemies.length;
+            const cy = enemies.reduce((s, e) => s + e.y, 0) / enemies.length;
+
+            // Parmi les 8 cases adjacentes, choisir celle qui maximise la distance au centroïde
+            let bestFlee = null;
+            let bestDist = -1;
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    if (!dx && !dy) continue;
+                    const nx = sx + dx, ny = sy + dy;
+                    if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
+                    const nkey = `${nx}_${ny}`;
+                    if (planetCache.has(nkey)) continue; // éviter les planètes
+                    const dist = chebyshevDist(nx, ny, Math.round(cx), Math.round(cy));
+                    if (dist > bestDist) { bestDist = dist; bestFlee = { x: nx, y: ny }; }
+                }
+            }
+
+            if (bestFlee) {
+                log(ship.nom, `🏃 FUIR vers (${bestFlee.x},${bestFlee.y}) loin de centroïde (${Math.round(cx)},${Math.round(cy)})`);
+                try {
+                    await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", bestFlee.x, bestFlee.y);
+                } catch (e) {
+                    log(ship.nom, `✗ Fuite échouée : ${e.message}`);
+                }
+            } else {
+                log(ship.nom, "Aucune case de fuite disponible");
+            }
+            break;
+        }
 
         case Phase.SEARCH: {
             await scanAroundShip(sx, sy);
