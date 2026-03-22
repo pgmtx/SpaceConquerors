@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/Users/Eric/Documents/code_projects/SpaceConquerors/src/*.js)",
+      "Bash(npx vite:*)"
+    ]
+  }
+}
