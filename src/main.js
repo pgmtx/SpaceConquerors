@@ -135,6 +135,7 @@ async function refreshMap() {
       state.mapCells = cells || [];
       updateMinimapData(state.mapCells);
       await renderMap(state.mapCells);
+      updateLeaderboard(state.allTeams);
       const selection = getSelectionFromState();
       if (selection) {
         applySelection(selection);

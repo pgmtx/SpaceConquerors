@@ -48,6 +48,52 @@ function getGold(team) {
   return getResource(team, "CREDIT");
 }
 
+function getPlanetCount(team) {
+  return Array.isArray(team?.planetes) ? team.planetes.length : 0;
+}
+
+function countPlanetsByOwner(teams) {
+  const counts = new Map();
+
+  for (const cell of state.mapCells || []) {
+    if (!cell?.planete || cell.planete.modelePlanete?.typePlanete === "VIDE") {
+      continue;
+    }
+
+    const ownerId = getPlanetOwnerId(cell.planete, {
+      cell,
+      mapCells: state.mapCells,
+      teams,
+      myTeam: state.myTeam,
+      selectedCell: state.selectedCell
+    });
+
+    if (!ownerId) {
+      continue;
+    }
+
+    counts.set(ownerId, (counts.get(ownerId) || 0) + 1);
+  }
+
+  for (const team of teams || []) {
+    const teamId = normalizeTeamId(team);
+    if (!teamId || counts.has(teamId)) {
+      continue;
+    }
+
+    counts.set(teamId, getPlanetCount(team));
+  }
+
+  return counts;
+}
+
+function getDisplayedPlanetCount(team, planetCounts) {
+  const teamId = normalizeTeamId(team);
+  return teamId && planetCounts.has(teamId)
+    ? planetCounts.get(teamId)
+    : getPlanetCount(team);
+}
+
 function isShipAvailable(ship) {
   if (!ship?.dateProchaineAction) {
     return true;
@@ -168,6 +214,7 @@ export function updateHUD(team) {
 export function updateLeaderboard(teams) {
   const list = document.getElementById("leaderboard-list");
   list.innerHTML = "";
+  const planetCounts = countPlanetsByOwner(teams);
 
   const header = document.createElement("div");
   header.className = "lb-row lb-head";
@@ -175,6 +222,7 @@ export function updateLeaderboard(teams) {
     <span class="lb-rank">#</span>
     <span class="lb-color"></span>
     <span class="lb-name">Equipe</span>
+    <span class="lb-planets" title="Planètes">Plan.</span>
     <span class="lb-gold" title="Gold">Gold</span>
     <span class="lb-pts">Pts</span>
   `;
@@ -190,6 +238,7 @@ export function updateLeaderboard(teams) {
         <span class="lb-rank">${index + 1}</span>
         <span class="lb-color" style="background:#${getTeamColor(team.idEquipe).toString(16).padStart(6, "0")}"></span>
         <span class="lb-name" title="${team.nom}">${team.nom}</span>
+        <span class="lb-planets" title="Planètes">${fmt(getDisplayedPlanetCount(team, planetCounts))}</span>
         <span class="lb-gold" title="Gold">${fmt(getGold(team))}</span>
         <span class="lb-pts">${fmt(getResource(team, "POINT"))}</span>
       `;
