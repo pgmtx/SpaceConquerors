@@ -506,29 +506,23 @@ async function refreshAllTeams() {
       getGameParams().catch(() => [])
     ]);
 
-    const teamDetails = await Promise.allSettled(
-      (teamSummaries || [])
-        .map((team) => normalizeTeamId(team))
-        .filter(Boolean)
-        .map((teamId) => getTeam(teamId))
-    );
+    const myTeamDetail = await getTeam(state.teamId).catch(() => null);
 
-    state.allTeams = (teamSummaries || []).map((team, index) => {
-      const detail = teamDetails[index];
-      if (detail?.status !== "fulfilled") {
+    state.allTeams = (teamSummaries || []).map((team) => {
+      const id = normalizeTeamId(team);
+      if (id === state.teamId && myTeamDetail) {
         return {
           ...team,
-          planetes: team.planetes || []
+          ...myTeamDetail,
+          modules: myTeamDetail.modules || team.modules || [],
+          vaisseaux: myTeamDetail.vaisseaux || team.vaisseaux || [],
+          planetes: myTeamDetail.planetes || team.planetes || [],
+          ressources: myTeamDetail.ressources || team.ressources || []
         };
       }
-
       return {
         ...team,
-        ...detail.value,
-        modules: detail.value?.modules || team.modules || [],
-        vaisseaux: detail.value?.vaisseaux || team.vaisseaux || [],
-        planetes: detail.value?.planetes || team.planetes || [],
-        ressources: detail.value?.ressources || team.ressources || []
+        planetes: team.planetes || []
       };
     });
     state.myPlans = plans || [];
