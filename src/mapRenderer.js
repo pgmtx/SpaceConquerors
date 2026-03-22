@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { loadModuleModel, loadShipModel } from "./models.js";
+import { getPlanetOwnerId, normalizeTeamId } from "./ownership.js";
 import { scene, worldPos } from "./scene.js";
 import { state } from "./state.js";
 
@@ -38,18 +39,6 @@ const shipObjects = new Map();
 let selectedShipId = null;
 let selectedPlanetId = null;
 let selectedCellKey = null;
-
-function normalizeTeamId(teamId) {
-  if (!teamId) {
-    return null;
-  }
-
-  if (typeof teamId === "string") {
-    return teamId;
-  }
-
-  return teamId.idEquipe || teamId.teamId || teamId.id || null;
-}
 
 function blendHex(baseHex, targetHex, factor) {
   const base = new THREE.Color(baseHex);
@@ -149,7 +138,17 @@ function updateCellTile(group, cell) {
     return;
   }
 
-  const ownerId = normalizeTeamId(cell.proprietaire);
+  const ownerId = normalizeTeamId(cell.proprietaire) || (
+    cell.planete
+      ? getPlanetOwnerId(cell.planete, {
+          cell,
+          mapCells: state.mapCells,
+          teams: state.allTeams,
+          myTeam: state.myTeam,
+          selectedCell: state.selectedCell
+        })
+      : null
+  );
   const color = ownerId ? getTeamColor(ownerId) : 0x0a1528;
   tile.material.color.setHex(color);
   tile.material.opacity = ownerId ? 0.34 : 0.18;
@@ -188,7 +187,13 @@ async function buildPlanet(cell) {
   const override = TYPE_OVERRIDES[type];
   const palette = override || BIOME_COLORS[biome] || { color: 0x6c7b8d, emissive: 0x13202f };
   const radius = override?.radius || (type === "GAZEUSE" ? 0.62 : 0.48);
-  const ownerId = normalizeTeamId(cell.proprietaire) || normalizeTeamId(planet.proprietaire);
+  const ownerId = getPlanetOwnerId(planet, {
+    cell,
+    mapCells: state.mapCells,
+    teams: state.allTeams,
+    myTeam: state.myTeam,
+    selectedCell: state.selectedCell
+  });
   const ownerColor = ownerId ? getTeamColor(ownerId) : null;
   const surfaceColor = ownerColor ? blendHex(palette.color, ownerColor, 0.82) : palette.color;
   const emissiveColor = ownerColor ? blendHex(palette.emissive, ownerColor, 0.4) : palette.emissive;

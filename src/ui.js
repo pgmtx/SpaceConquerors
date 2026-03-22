@@ -12,6 +12,7 @@ import {
   renameShip
 } from "./api.js";
 import { getTeamColor } from "./mapRenderer.js";
+import { getPlanetOwnerId, normalizeTeamId } from "./ownership.js";
 import { state } from "./state.js";
 
 function fmt(value) {
@@ -48,20 +49,42 @@ function createShipName(plan) {
   return `${base} ${Math.floor(100 + Math.random() * 900)}`;
 }
 
-function normalizeTeamId(teamId) {
-  if (!teamId) {
+function findCellForPlanet(planet) {
+  if (!planet) {
     return null;
   }
 
-  if (typeof teamId === "string") {
-    return teamId;
+  if (
+    state.selectedCell?.planete?.identifiant &&
+    planet.identifiant &&
+    state.selectedCell.planete.identifiant === planet.identifiant
+  ) {
+    return state.selectedCell;
   }
 
-  return teamId.idEquipe || teamId.teamId || teamId.id || null;
+  if (planet.identifiant) {
+    const matchedById = state.mapCells.find((cell) => cell.planete?.identifiant === planet.identifiant);
+    if (matchedById) {
+      return matchedById;
+    }
+  }
+
+  if (planet.coord_x !== undefined && planet.coord_y !== undefined) {
+    return state.mapCells.find((cell) => cell.coord_x === planet.coord_x && cell.coord_y === planet.coord_y) || null;
+  }
+
+  return null;
 }
 
 function ownerIdOfPlanet(planet) {
-  return normalizeTeamId(planet?.proprietaire);
+  const cell = findCellForPlanet(planet);
+  return getPlanetOwnerId(planet, {
+    cell,
+    selectedCell: state.selectedCell,
+    mapCells: state.mapCells,
+    teams: state.allTeams,
+    myTeam: state.myTeam
+  });
 }
 
 function getTeamById(teamId) {
@@ -300,6 +323,7 @@ export function showShipInfo(ship) {
 }
 
 let lastPlanetId = null;
+let planetPanelMode = "overview";
 
 export function refreshSelectedPlanet(mapCells) {
   if (!lastPlanetId) {
@@ -313,22 +337,93 @@ export function refreshSelectedPlanet(mapCells) {
       coord_x: cell.coord_x,
       coord_y: cell.coord_y,
       proprietaire: cell.proprietaire
-    });
+    }, { mode: planetPanelMode });
   }
 }
 
-export function showPlanetInfo(planet) {
+function renderPlanetOverviewStats(planet, ownership) {
+  const hp = planet.pointDeVie ?? 0;
+
+  setStats([
+    { key: "PV", val: fmt(hp), cls: hp > 100 ? "good" : hp > 0 ? "warn" : "bad" },
+    { key: "MINERAI", val: fmt(planet.mineraiDisponible ?? 0) },
+    { key: "SLOTS", val: `${(planet.modules || []).length} / ${fmt(planet.slotsConstruction ?? 0)}` },
+    { key: "COORD", val: `(${fmt(planet.coord_x)}, ${fmt(planet.coord_y)})` },
+    { key: "Ã‰QUIPE", val: ownership.ownerName }
+  ]);
+}
+
+function renderPlanetCommandCard(planet, isMine) {
+  if (!isMine) {
+    buildCommandCard([]);
+    return;
+  }
+
+  buildCommandCard([
+    {
+      icon: "i",
+      label: "Infos",
+      active: planetPanelMode === "overview",
+      action: () => showPlanetInfo(planet, { mode: "overview" })
+    },
+    {
+      icon: "M",
+      label: "Modules",
+      active: planetPanelMode === "modules",
+      action: () => showPlanetInfo(planet, { mode: "modules" })
+    },
+    {
+      icon: "ðŸ”¨",
+      label: "Construire",
+      action: () => openShipBuilder(planet)
+    }
+  ]);
+}
+
+export function showPlanetInfo(planet, options = {}) {
   if (!planet) {
     return closeInfoPanel();
   }
 
   lastPlanetId = planet.identifiant;
-  const modules = planet.modules || [];
   const hp = planet.pointDeVie ?? 0;
   const hpRatio = Math.max(0, Math.min(1, hp / Math.max(hp, 100)));
   const ownerId = ownerIdOfPlanet(planet);
   const isMine = ownerId === state.teamId;
   const ownership = getOwnershipDetails(ownerId);
+  planetPanelMode = isMine && options.mode === "modules" ? "modules" : "overview";
+
+  setPortrait(
+    "P",
+    planet.nom,
+    `${planet.modelePlanete?.typePlanete || "--"} / ${planet.modelePlanete?.biome || "--"}`,
+    hpRatio
+  );
+
+  if (planetPanelMode === "modules") {
+    renderModulesInStats(planet);
+  } else {
+    renderPlanetOverviewStats(planet, ownership);
+  }
+
+  renderPlanetCommandCard(planet, isMine);
+  return;
+
+  setPortrait(
+    "ðŸŒ",
+    planet.nom,
+    `${planet.modelePlanete?.typePlanete || "--"} Â· ${planet.modelePlanete?.biome || "--"}`,
+    hpRatio
+  );
+
+  if (planetPanelMode === "modules") {
+    renderModulesInStats(planet);
+  } else {
+    renderPlanetOverviewStats(planet, ownership);
+  }
+
+  renderPlanetCommandCard(planet, isMine);
+  return;
 
   setPortrait(
     "🌍",
@@ -370,7 +465,9 @@ export function showCellInfo(cell) {
     return closeInfoPanel();
   }
 
-  const ownerId = cell.proprietaire?.idEquipe || null;
+  const ownerId = cell.planete
+    ? ownerIdOfPlanet(cell.planete)
+    : normalizeTeamId(cell.proprietaire);
   const ownership = getOwnershipDetails(ownerId);
   const content = cell.planete
     ? `PlanÃ¨te ${cell.planete.nom || ""}`.trim()
@@ -387,11 +484,48 @@ export function showCellInfo(cell) {
   buildCommandCard([]);
 }
 
+function resolvePlanetDetails(planet) {
+  if (!planet?.identifiant) {
+    return planet;
+  }
+
+  const detailedPlanet =
+    (state.myTeam?.planetes || []).find((item) => item.identifiant === planet.identifiant) ||
+    planet;
+
+  const placedModulesFromInventory = (state.myTeam?.modules || []).filter(
+    (module) => module.idPlanete === planet.identifiant
+  );
+  const mergedModules = [
+    ...(detailedPlanet.modules || []),
+    ...placedModulesFromInventory
+  ];
+
+  const dedupedModules = [];
+  const seenModuleIds = new Set();
+  mergedModules.forEach((module) => {
+    const moduleId = module?.id || module?.paramModule?.id || `${module?.paramModule?.typeModule || "module"}_${dedupedModules.length}`;
+    if (seenModuleIds.has(moduleId)) {
+      return;
+    }
+
+    seenModuleIds.add(moduleId);
+    dedupedModules.push(module);
+  });
+
+  return {
+    ...planet,
+    ...detailedPlanet,
+    modules: dedupedModules
+  };
+}
+
 async function renderModulesInStats(planet) {
   const container = document.getElementById("stats-content");
   container.innerHTML = "";
 
-  const placed = planet.modules || [];
+  const resolvedPlanet = resolvePlanetDetails(planet);
+  const placed = resolvedPlanet.modules || [];
   const available = (state.myTeam?.modules || []).filter((module) => !module.idPlanete);
 
   if (placed.length === 0 && available.length === 0) {
@@ -430,7 +564,7 @@ async function renderModulesInStats(planet) {
     row.querySelector(".stat-val").addEventListener("click", async (event) => {
       event.stopPropagation();
       try {
-        await placeModule(state.teamId, module.id, planet.identifiant);
+        await placeModule(state.teamId, module.id, resolvedPlanet.identifiant);
         notify(`Module ${module.paramModule?.typeModule || module.id} posé`, "success");
         state.myTeam.modules = await getModules(state.teamId);
         await state.actions.fullSync?.();
@@ -962,8 +1096,29 @@ export async function openMarket() {
 let builderPlanet = null;
 let selectedPlan = null;
 
+export async function craftShipFromPlan(planet, plan, shipName = "") {
+  if (!planet?.identifiant) {
+    throw new Error("Planète invalide");
+  }
+
+  if (!plan?.typeVaisseau?.id) {
+    throw new Error("Plan invalide");
+  }
+
+  await buildShip(state.teamId, {
+    nom: shipName.trim() || createShipName(plan),
+    idTypeVaisseau: plan.typeVaisseau.id,
+    idPlanete: planet.identifiant
+  });
+
+  notify("Construction lancée", "success");
+  await state.actions.refreshAll?.();
+  await state.actions.refreshMap?.();
+}
+
 export async function openShipBuilder(planet) {
-  builderPlanet = planet;
+  const resolvedPlanet = resolvePlanetDetails(planet);
+  builderPlanet = resolvedPlanet;
   selectedPlan = null;
 
   document.getElementById("builder-modal").classList.remove("hidden");
@@ -971,7 +1126,7 @@ export async function openShipBuilder(planet) {
   document.getElementById("builder-list").innerHTML = `<div class="helper-text">Chargement des plans...</div>`;
 
   const constructionTypes = new Set(
-    (planet.modules || [])
+    (resolvedPlanet.modules || [])
       .flatMap((module) => module.paramModule?.listeVaisseauxConstructible || [])
       .map((type) => type.id)
       .filter(Boolean)
@@ -986,15 +1141,33 @@ export async function openShipBuilder(planet) {
 
   try {
     const plans = state.myPlans.length ? state.myPlans : await getPlans(state.teamId);
-    const buildablePlans = constructionTypes.size > 0
-      ? plans.filter((plan) => constructionTypes.has(plan.typeVaisseau?.id))
+    const compatibleClasses = [...new Set(
+      (resolvedPlanet.modules || [])
+        .flatMap((module) => module.paramModule?.listeVaisseauxConstructible || [])
+        .map((type) => type.classeVaisseau || type.nom || type.id)
+        .filter(Boolean)
+    )];
+    const buildablePlans = constructionTypes.size > 0 || compatibleClasses.length > 0
+      ? plans.filter((plan) =>
+          constructionTypes.has(plan.typeVaisseau?.id) ||
+          compatibleClasses.includes(plan.typeVaisseau?.classeVaisseau) ||
+          compatibleClasses.includes(plan.typeVaisseau?.nom)
+        )
       : plans;
+    const ownedPlanClasses = [...new Set(
+      plans
+        .map((plan) => plan.typeVaisseau?.classeVaisseau || plan.nom)
+        .filter(Boolean)
+    )];
 
     state.myPlans = plans;
     const list = document.getElementById("builder-list");
     list.innerHTML = "";
 
     if (!buildablePlans.length) {
+      if (compatibleClasses.length) {
+        hint.textContent = `Chantier sur ${resolvedPlanet.nom}: ${compatibleClasses.join(", ")}. Plans possÃ©dÃ©s: ${ownedPlanClasses.join(", ") || "aucun"}.`;
+      }
       list.innerHTML = `<div class="helper-text">Aucun plan constructible depuis cette planète.</div>`;
       return;
     }
@@ -1017,6 +1190,11 @@ export async function openShipBuilder(planet) {
         selectedPlan = plan;
       });
       list.appendChild(row);
+
+      if (buildablePlans.length === 1) {
+        row.classList.add("selected");
+        selectedPlan = plan;
+      }
     });
   } catch (error) {
     document.getElementById("builder-list").innerHTML = `<div class="helper-text">${error.message}</div>`;
@@ -1035,15 +1213,8 @@ export async function openShipBuilder(planet) {
     replacement.disabled = true;
 
     try {
-      await buildShip(state.teamId, {
-        nom: createShipName(selectedPlan),
-        idTypeVaisseau: selectedPlan.typeVaisseau?.id,
-        idPlanete: builderPlanet.identifiant
-      });
-      notify("Construction lancée", "success");
+      await craftShipFromPlan(builderPlanet, selectedPlan);
       document.getElementById("builder-modal").classList.add("hidden");
-      await state.actions.refreshAll?.();
-      await state.actions.refreshMap?.();
     } catch (error) {
       notify(error.message, "error");
       replacement.disabled = false;

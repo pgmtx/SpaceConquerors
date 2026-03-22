@@ -21,6 +21,7 @@ export const state = {
 
   minimapPlanets: [],
   pendingAction: null,
+  movementPlan: null,
 
   actions: {}
 };

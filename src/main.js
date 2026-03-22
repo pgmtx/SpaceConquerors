@@ -1,15 +1,18 @@
 import * as THREE from "three";
 import {
   getAllTeams,
+  doAction,
   getGameParams,
   getMap,
   getModules,
   getPlans,
   getShips,
+  getTeam,
   getTeamIdFromToken
 } from "./api.js";
 import { animateMap, highlightCell, highlightPlanet, highlightShip, renderMap } from "./mapRenderer.js";
 import { preloadAllModels } from "./models.js";
+import { getPlanetOwnerId, normalizeTeamId } from "./ownership.js";
 import { camera, focusOnShip, focusOnWholeMap, initScene, panCameraTo, render, renderer } from "./scene.js";
 import { state } from "./state.js";
 import {
@@ -31,8 +34,11 @@ import {
 } from "./ui.js";
 
 let teamSelectIndex = 0;
+let planetSelectIndex = -1;
 const keys = {};
 const moveAccumulator = { x: 0, y: 0 };
+let movementPlanTimer = null;
+let processingMovementPlan = false;
 
 async function main() {
   setLoading(5, "Récupération du token de jeu...");
@@ -140,9 +146,321 @@ async function fetchWholeMap() {
   );
 }
 
+function movementCellKey(coordX, coordY) {
+  return `${coordX}_${coordY}`;
+}
+
+function getCurrentShipById(shipId) {
+  if (!shipId) {
+    return null;
+  }
+
+  return state.myTeam?.vaisseaux?.find((ship) => ship.idVaisseau === shipId) || null;
+}
+
+function getShipMoveRange(ship) {
+  const rawSpeed = ship?.type?.vitesse ?? ship?.vitesse ?? 1;
+  const numericSpeed = Number.parseInt(rawSpeed, 10);
+  return Number.isFinite(numericSpeed) && numericSpeed > 0 ? numericSpeed : 1;
+}
+
+function getActionReadyDelay(ship) {
+  if (!ship?.dateProchaineAction) {
+    return 0;
+  }
+
+  const nextDate = new Date(ship.dateProchaineAction);
+  if (Number.isNaN(nextDate.getTime())) {
+    return 0;
+  }
+
+  return Math.max(0, nextDate.getTime() - Date.now() + 250);
+}
+
+async function getCellsForPathfinding() {
+  const expectedCellCount = state.mapWorldSize * state.mapWorldSize;
+  if (state.mapCells.length >= expectedCellCount) {
+    return state.mapCells;
+  }
+
+  return fetchWholeMap();
+}
+
+function buildMovementLookup(cells) {
+  const lookup = new Map();
+  (cells || []).forEach((cell) => {
+    lookup.set(movementCellKey(cell.coord_x, cell.coord_y), cell);
+  });
+  return lookup;
+}
+
+function getMovementCell(lookup, coordX, coordY) {
+  return lookup.get(movementCellKey(coordX, coordY)) || {
+    coord_x: coordX,
+    coord_y: coordY,
+    proprietaire: null,
+    planete: null,
+    vaisseau: null
+  };
+}
+
+function isTraversableMovementCell(cell, startKey, targetKey) {
+  if (!cell) {
+    return true;
+  }
+
+  const cellKey = movementCellKey(cell.coord_x, cell.coord_y);
+  if (cellKey === startKey || cellKey === targetKey) {
+    return true;
+  }
+
+  return !cell.planete || cell.planete.modelePlanete?.typePlanete === "VIDE";
+}
+
+function findShortestPath(startX, startY, targetX, targetY, cells) {
+  if (
+    startX === undefined ||
+    startY === undefined ||
+    targetX === undefined ||
+    targetY === undefined
+  ) {
+    return null;
+  }
+
+  const startKey = movementCellKey(startX, startY);
+  const targetKey = movementCellKey(targetX, targetY);
+
+  if (startKey === targetKey) {
+    return [{ coord_x: startX, coord_y: startY }];
+  }
+
+  const lookup = buildMovementLookup(cells);
+  const queue = [[startX, startY]];
+  const visited = new Set([startKey]);
+  const previous = new Map();
+  const directions = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1]
+  ];
+
+  while (queue.length > 0) {
+    const [currentX, currentY] = queue.shift();
+    const currentKey = movementCellKey(currentX, currentY);
+
+    for (const [offsetX, offsetY] of directions) {
+      const nextX = currentX + offsetX;
+      const nextY = currentY + offsetY;
+
+      if (
+        nextX < 0 ||
+        nextY < 0 ||
+        nextX >= state.mapWorldSize ||
+        nextY >= state.mapWorldSize
+      ) {
+        continue;
+      }
+
+      const nextKey = movementCellKey(nextX, nextY);
+      if (visited.has(nextKey)) {
+        continue;
+      }
+
+      const nextCell = getMovementCell(lookup, nextX, nextY);
+      if (!isTraversableMovementCell(nextCell, startKey, targetKey)) {
+        continue;
+      }
+
+      visited.add(nextKey);
+      previous.set(nextKey, currentKey);
+
+      if (nextKey === targetKey) {
+        queue.length = 0;
+        break;
+      }
+
+      queue.push([nextX, nextY]);
+    }
+  }
+
+  if (!visited.has(targetKey)) {
+    return null;
+  }
+
+  const path = [];
+  let currentKey = targetKey;
+
+  while (currentKey) {
+    const [coordX, coordY] = currentKey.split("_").map((value) => Number.parseInt(value, 10));
+    path.push({ coord_x: coordX, coord_y: coordY });
+    currentKey = previous.get(currentKey);
+  }
+
+  return path.reverse();
+}
+
+function clearMovementPlan(message = "", type = "info") {
+  clearTimeout(movementPlanTimer);
+  movementPlanTimer = null;
+  state.movementPlan = null;
+
+  if (message) {
+    notify(message, type);
+  }
+}
+
+function scheduleMovementPlanRetry(delayMs = 500) {
+  clearTimeout(movementPlanTimer);
+
+  if (!state.movementPlan) {
+    movementPlanTimer = null;
+    return;
+  }
+
+  movementPlanTimer = setTimeout(() => {
+    processMovementPlan().catch((error) => {
+      console.error(error);
+      clearMovementPlan(`Trajet interrompu : ${error.message}`, "error");
+    });
+  }, Math.max(350, delayMs));
+}
+
+async function planShipMovement(ship, targetX, targetY) {
+  const currentShip = getCurrentShipById(ship?.idVaisseau) || ship;
+  if (!currentShip) {
+    notify("Vaisseau introuvable", "error");
+    clearPendingAction();
+    return false;
+  }
+
+  if (currentShip.positionX === targetX && currentShip.positionY === targetY) {
+    clearPendingAction();
+    notify("Le vaisseau est déjà sur cette case", "info");
+    return false;
+  }
+
+  const cells = await getCellsForPathfinding();
+  const path = findShortestPath(
+    currentShip.positionX,
+    currentShip.positionY,
+    targetX,
+    targetY,
+    cells
+  );
+
+  clearPendingAction();
+
+  if (!path) {
+    notify("Aucun chemin disponible jusqu'à cette case", "error");
+    return false;
+  }
+
+  clearTimeout(movementPlanTimer);
+  movementPlanTimer = null;
+  state.movementPlan = {
+    shipId: currentShip.idVaisseau,
+    shipName: currentShip.nom || "Vaisseau",
+    targetX,
+    targetY
+  };
+
+  notify(
+    `Trajet défini vers (${targetX}, ${targetY}) · ${Math.max(0, path.length - 1)} cases`,
+    "success"
+  );
+
+  await processMovementPlan();
+  return true;
+}
+
+async function processMovementPlan() {
+  if (processingMovementPlan || !state.movementPlan) {
+    return;
+  }
+
+  processingMovementPlan = true;
+  clearTimeout(movementPlanTimer);
+  movementPlanTimer = null;
+
+  try {
+    const plan = state.movementPlan;
+    const ship = getCurrentShipById(plan.shipId) || state.selectedShip;
+
+    if (!ship || ship.idVaisseau !== plan.shipId) {
+      clearMovementPlan("Trajet annulé : vaisseau introuvable", "error");
+      return;
+    }
+
+    if (ship.positionX === plan.targetX && ship.positionY === plan.targetY) {
+      clearMovementPlan(`Trajet terminé pour ${ship.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    const readyDelay = getActionReadyDelay(ship);
+    if (readyDelay > 0) {
+      scheduleMovementPlanRetry(readyDelay);
+      return;
+    }
+
+    const cells = await getCellsForPathfinding();
+    const path = findShortestPath(
+      ship.positionX,
+      ship.positionY,
+      plan.targetX,
+      plan.targetY,
+      cells
+    );
+
+    if (!path) {
+      clearMovementPlan("Aucun chemin disponible jusqu'à cette case", "error");
+      return;
+    }
+
+    const nextWaypoint = path[Math.min(path.length - 1, getShipMoveRange(ship))];
+    if (
+      !nextWaypoint ||
+      (nextWaypoint.coord_x === ship.positionX && nextWaypoint.coord_y === ship.positionY)
+    ) {
+      clearMovementPlan(`Trajet terminé pour ${ship.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    const response = await doAction(
+      state.teamId,
+      ship.idVaisseau,
+      "DEPLACEMENT",
+      nextWaypoint.coord_x,
+      nextWaypoint.coord_y
+    );
+
+    if (response?.message) {
+      notify(`DEPLACEMENT : ${response.message}`, "success");
+    }
+
+    await fullSync();
+
+    if (!state.movementPlan || state.movementPlan.shipId !== plan.shipId) {
+      return;
+    }
+
+    const refreshedShip = getCurrentShipById(plan.shipId) || ship;
+    if (refreshedShip.positionX === plan.targetX && refreshedShip.positionY === plan.targetY) {
+      clearMovementPlan(`Trajet terminé pour ${refreshedShip.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    scheduleMovementPlanRetry(getActionReadyDelay(refreshedShip) || 400);
+  } catch (error) {
+    clearMovementPlan(`Trajet interrompu : ${error.message}`, "error");
+  } finally {
+    processingMovementPlan = false;
+  }
+}
+
 async function refreshAllTeams() {
   try {
-    const [teams, ships, modules, plans, gameParams] = await Promise.all([
+    const [teamSummaries, ships, modules, plans, gameParams] = await Promise.all([
       getAllTeams(),
       getShips(state.teamId),
       getModules(state.teamId),
@@ -150,14 +468,39 @@ async function refreshAllTeams() {
       getGameParams().catch(() => [])
     ]);
 
-    state.allTeams = teams || [];
+    const teamDetails = await Promise.allSettled(
+      (teamSummaries || [])
+        .map((team) => normalizeTeamId(team))
+        .filter(Boolean)
+        .map((teamId) => getTeam(teamId))
+    );
+
+    state.allTeams = (teamSummaries || []).map((team, index) => {
+      const detail = teamDetails[index];
+      if (detail?.status !== "fulfilled") {
+        return {
+          ...team,
+          planetes: team.planetes || []
+        };
+      }
+
+      return {
+        ...team,
+        ...detail.value,
+        modules: detail.value?.modules || team.modules || [],
+        vaisseaux: detail.value?.vaisseaux || team.vaisseaux || [],
+        planetes: detail.value?.planetes || team.planetes || [],
+        ressources: detail.value?.ressources || team.ressources || []
+      };
+    });
     state.myPlans = plans || [];
     state.gameParams = gameParams || [];
     state.myTeam =
       state.allTeams.find((team) => team.idEquipe === state.teamId) || {
         idEquipe: state.teamId,
         nom: "Mon équipe",
-        ressources: []
+        ressources: [],
+        planetes: []
       };
 
     state.myTeam.vaisseaux = (ships || []).map((ship) => ({
@@ -165,6 +508,7 @@ async function refreshAllTeams() {
       proprietaire: ship.proprietaire || state.teamId
     }));
     state.myTeam.modules = modules || [];
+    state.myTeam.planetes = state.myTeam.planetes || [];
     state.teamName = state.myTeam.nom || "";
 
     updateHUD(state.myTeam);
@@ -174,6 +518,13 @@ async function refreshAllTeams() {
       const refreshedShip = state.myTeam.vaisseaux.find((ship) => ship.idVaisseau === state.selectedShip.idVaisseau);
       if (refreshedShip) {
         applySelection(buildSelectionForShip(refreshedShip));
+      }
+    }
+
+    if (state.movementPlan && !processingMovementPlan && !movementPlanTimer) {
+      const plannedShip = getCurrentShipById(state.movementPlan.shipId);
+      if (plannedShip) {
+        scheduleMovementPlanRetry(getActionReadyDelay(plannedShip) || 250);
       }
     }
   } catch (error) {
@@ -188,11 +539,18 @@ function updateMinimapData(cells) {
     }
 
     const key = `${cell.coord_x}_${cell.coord_y}`;
+    const ownerId = getPlanetOwnerId(cell.planete, {
+      cell,
+      mapCells: state.mapCells,
+      teams: state.allTeams,
+      myTeam: state.myTeam,
+      selectedCell: state.selectedCell
+    });
     const payload = {
       key,
       x: cell.coord_x,
       y: cell.coord_y,
-      ownerId: cell.proprietaire?.idEquipe || null,
+      ownerId,
       type: cell.planete.modelePlanete?.typePlanete || null
     };
 
@@ -277,18 +635,6 @@ function findCellByPlanetId(planetId) {
   return state.mapCells.find((cell) => cell.planete?.identifiant === planetId) || null;
 }
 
-function normalizeTeamId(teamId) {
-  if (!teamId) {
-    return null;
-  }
-
-  if (typeof teamId === "string") {
-    return teamId;
-  }
-
-  return teamId.idEquipe || teamId.teamId || teamId.id || null;
-}
-
 function normalizeShip(ship, cell = null) {
   if (!ship) {
     return null;
@@ -307,12 +653,81 @@ function normalizePlanetFromCell(cell) {
     return null;
   }
 
+  const ownerId = getPlanetOwnerId(cell.planete, {
+    cell,
+    mapCells: state.mapCells,
+    teams: state.allTeams,
+    myTeam: state.myTeam,
+    selectedCell: state.selectedCell
+  });
+
   return {
     ...cell.planete,
     coord_x: cell.coord_x,
     coord_y: cell.coord_y,
-    proprietaire: normalizeTeamId(cell.planete.proprietaire) || normalizeTeamId(cell.proprietaire)
+    proprietaire: ownerId
   };
+}
+
+function getSelectedCraftPlanet() {
+  if (state.selectedPlanet?.identifiant) {
+    const selectedPlanetCell = findCellByPlanetId(state.selectedPlanet.identifiant);
+    const normalizedPlanet = selectedPlanetCell
+      ? normalizePlanetFromCell(selectedPlanetCell)
+      : {
+          ...state.selectedPlanet,
+          proprietaire: getPlanetOwnerId(state.selectedPlanet, {
+            mapCells: state.mapCells,
+            teams: state.allTeams,
+            myTeam: state.myTeam,
+            selectedCell: state.selectedCell
+          })
+        };
+
+    return normalizedPlanet?.proprietaire === state.teamId ? normalizedPlanet : null;
+  }
+
+  if (state.selectedCell?.planete) {
+    const selectedPlanet = normalizePlanetFromCell(state.selectedCell);
+    return selectedPlanet?.proprietaire === state.teamId ? selectedPlanet : null;
+  }
+
+  return null;
+}
+
+function updateCraftButtonState() {
+  const craftButton = document.getElementById("craft-btn");
+  if (!craftButton) {
+    return;
+  }
+
+  const craftPlanet = getSelectedCraftPlanet();
+  craftButton.disabled = !craftPlanet;
+  craftButton.title = craftPlanet
+    ? `Construire un vaisseau sur ${craftPlanet.nom || "la planète sélectionnée"}`
+    : "Sélectionnez une de vos planètes pour construire";
+}
+
+function openCraftForSelection() {
+  const craftPlanet = getSelectedCraftPlanet();
+  if (!craftPlanet) {
+    notify("Sélectionnez une de vos planètes pour construire", "error");
+    return;
+  }
+
+  openShipBuilder(craftPlanet);
+}
+
+function isTypingTarget(target) {
+  return Boolean(
+    target &&
+    (
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.tagName === "SELECT" ||
+      target.isContentEditable
+    )
+  );
 }
 
 function buildCellSelection(cell) {
@@ -412,7 +827,12 @@ function buildSelectionForPlanet(planet) {
     ...planet,
     coord_x: planet.coord_x ?? 0,
     coord_y: planet.coord_y ?? 0,
-    proprietaire: normalizeTeamId(planet.proprietaire)
+    proprietaire: getPlanetOwnerId(planet, {
+      mapCells: state.mapCells,
+      teams: state.allTeams,
+      myTeam: state.myTeam,
+      selectedCell: state.selectedCell
+    })
   };
 
   return {
@@ -424,6 +844,34 @@ function buildSelectionForPlanet(planet) {
     ship: null,
     planet: normalizedPlanet
   };
+}
+
+function isSelectablePlanetCell(cell) {
+  return Boolean(cell?.planete && cell.planete.modelePlanete?.typePlanete !== "VIDE");
+}
+
+async function getSelectablePlanetCells() {
+  const cells = await getCellsForPathfinding();
+  return [...(cells || [])]
+    .filter((cell) => {
+      if (!isSelectablePlanetCell(cell)) {
+        return false;
+      }
+
+      const ownerId = getPlanetOwnerId(cell.planete, {
+        cell,
+        mapCells: cells,
+        teams: state.allTeams,
+        myTeam: state.myTeam,
+        selectedCell: state.selectedCell
+      });
+      return ownerId === state.teamId;
+    })
+    .sort((left, right) =>
+      left.coord_y === right.coord_y
+        ? left.coord_x - right.coord_x
+        : left.coord_y - right.coord_y
+    );
 }
 
 function getSelectionFromState() {
@@ -531,9 +979,13 @@ async function handlePrimaryMapClick(event, element, raycaster, mouse) {
 
   if (state.pendingAction) {
     if (clickedCell) {
-      const executed = await executePendingAction(clickedCell.coord_x, clickedCell.coord_y);
-      if (executed) {
-        await fullSync();
+      if (state.pendingAction.action === "DEPLACEMENT") {
+        await planShipMovement(state.pendingAction.vaisseau, clickedCell.coord_x, clickedCell.coord_y);
+      } else {
+        const executed = await executePendingAction(clickedCell.coord_x, clickedCell.coord_y);
+        if (executed) {
+          await fullSync();
+        }
       }
     }
     return;
@@ -602,6 +1054,7 @@ function scheduleAutoSync() {
 function registerButtons() {
   const mapModeButton = document.getElementById("map-mode-btn");
   const refreshButton = document.getElementById("refresh-btn");
+
   refreshButton.addEventListener("click", async () => {
     refreshButton.disabled = true;
     refreshButton.textContent = "Sync...";
@@ -669,6 +1122,9 @@ function registerInput() {
     keys[event.key] = true;
 
     if (event.key === "Escape") {
+      if (state.movementPlan) {
+        clearMovementPlan("Trajet annulé", "info");
+      }
       clearCurrentSelection();
       clearPendingAction();
       closeInfoPanel();
@@ -678,6 +1134,12 @@ function registerInput() {
       event.preventDefault();
       selectShipByIndex(event.shiftKey ? teamSelectIndex - 1 : teamSelectIndex + 1);
     }
+
+    if (event.key.toLowerCase() === "p" && !isTypingTarget(event.target)) {
+      event.preventDefault();
+      selectPlanetByDirection(event.shiftKey ? -1 : 1);
+    }
+
   });
 
   window.addEventListener("keyup", (event) => {
@@ -771,6 +1233,57 @@ function selectShipByIndex(index) {
     state.viewY = Math.max(0, Math.min(58 - state.viewSize, ship.positionY - Math.floor(state.viewSize / 2)));
     focusOnShip(ship.positionX, ship.positionY);
     scheduleMapRefresh();
+  }
+}
+
+async function selectPlanetByDirection(direction) {
+  try {
+    const planetCells = await getSelectablePlanetCells();
+    if (!planetCells.length) {
+      notify("Aucune de vos planetes disponible", "error");
+      return;
+    }
+
+    const currentPlanetId =
+      state.selectedPlanet?.identifiant ||
+      state.selectedCell?.planete?.identifiant ||
+      null;
+
+    const currentIndex = currentPlanetId
+      ? planetCells.findIndex((cell) => cell.planete?.identifiant === currentPlanetId)
+      : planetSelectIndex;
+
+    const nextIndex = currentIndex >= 0
+      ? ((currentIndex + direction) % planetCells.length + planetCells.length) % planetCells.length
+      : direction < 0
+        ? planetCells.length - 1
+        : 0;
+
+    planetSelectIndex = nextIndex;
+
+    const selectedCell = planetCells[nextIndex];
+    const selectedPlanet = normalizePlanetFromCell(selectedCell);
+    applySelection(buildPlanetSelectionFromCell(selectedCell));
+
+    if (selectedPlanet?.coord_x !== undefined && selectedPlanet?.coord_y !== undefined) {
+      if (state.fullMapMode) {
+        focusOnShip(selectedPlanet.coord_x, selectedPlanet.coord_y);
+        return;
+      }
+
+      state.viewX = Math.max(
+        0,
+        Math.min(58 - state.viewSize, selectedPlanet.coord_x - Math.floor(state.viewSize / 2))
+      );
+      state.viewY = Math.max(
+        0,
+        Math.min(58 - state.viewSize, selectedPlanet.coord_y - Math.floor(state.viewSize / 2))
+      );
+      focusOnShip(selectedPlanet.coord_x, selectedPlanet.coord_y);
+      scheduleMapRefresh();
+    }
+  } catch (error) {
+    notify(`Erreur planÃ¨tes: ${error.message}`, "error");
   }
 }
 
