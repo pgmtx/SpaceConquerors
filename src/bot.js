@@ -4,8 +4,9 @@
 
 import { doAction, getShips, getMap } from "./api.js";
 import { state } from "./state.js";
-import { notify } from "./ui.js";
+import { notify, runAttackLoop, runNavigationLoop } from "./ui.js";
 import { getRole, Role } from "./assignments.js";
+import { getPlanetOwnerId, normalizeTeamId } from "./ownership.js";
 
 // ── Constantes ────────────────────────────────────────────────
 const TICK_MS               = 3_000;
@@ -41,6 +42,7 @@ const reservedCells = new Set();
 // ── État par vaisseau ─────────────────────────────────────────
 // shipId → { phase, target, lastAttackTime, hpBeforeAttack }
 const shipState = new Map();
+const activeShipLoops = new Set();
 
 // ── Guard anti-concurrence ────────────────────────────────────
 let tickRunning = false;
@@ -93,49 +95,104 @@ function isAdjacent(x1, y1, x2, y2) {
     return chebyshevDist(x1, y1, x2, y2) === 1;
 }
 
-function findNextStep(sx, sy, tx, ty, avoidEnemies = true, avoidReserved = true) {
-    if (isAdjacent(sx, sy, tx, ty)) return null;
+function getApproachCells(tx, ty) {
+    const directions = [
+        { dx: 1, dy: 0 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 0, dy: -1 },
+    ];
 
+    return directions
+        .map(({ dx, dy }) => ({ x: tx + dx, y: ty + dy }))
+        .filter(({ x, y }) => x >= 0 && x < MAP_SIZE && y >= 0 && y < MAP_SIZE)
+        .filter(({ x, y }) => !planetCache.has(`${x}_${y}`));
+}
+
+function findPathToClosestApproach(sx, sy, tx, ty, avoidEnemies = true, avoidReserved = true) {
+    const approachCells = getApproachCells(tx, ty);
+    if (!approachCells.length) {
+        return null;
+    }
+    const directions = [
+        { dx: 1, dy: 0 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 0, dy: -1 },
+    ];
+
+    const targetKeys = new Set(approachCells.map(({ x, y }) => `${x}_${y}`));
     const startKey = `${sx}_${sy}`;
+    if (targetKeys.has(startKey)) {
+        return [{ x: sx, y: sy }];
+    }
+
     const parent = new Map([[startKey, null]]);
     const queue = [{ x: sx, y: sy }];
 
     while (queue.length > 0) {
         const { x, y } = queue.shift();
 
-        for (let dx = -1; dx <= 1; dx++) {
-            for (let dy = -1; dy <= 1; dy++) {
-                if (dx === 0 && dy === 0) continue;
-                const nx = x + dx, ny = y + dy;
-                if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
-                const nkey = `${nx}_${ny}`;
-                if (parent.has(nkey)) continue;
-                if (planetCache.has(nkey) && !(nx === tx && ny === ty)) continue;
-                if (avoidEnemies && enemyCache.has(nkey)) continue;
-                if (avoidReserved && reservedCells.has(nkey)) continue;
+        for (const { dx, dy } of directions) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) continue;
+            const nkey = `${nx}_${ny}`;
+            if (parent.has(nkey)) continue;
+            if (planetCache.has(nkey)) continue;
+            if (avoidEnemies && enemyCache.has(nkey)) continue;
+            if (avoidReserved && reservedCells.has(nkey)) continue;
 
-                parent.set(nkey, `${x}_${y}`);
+            parent.set(nkey, `${x}_${y}`);
 
-                if (isAdjacent(nx, ny, tx, ty)) {
-                    let cur = nkey;
-                    while (parent.get(cur) !== startKey) cur = parent.get(cur);
-                    const [fx, fy] = cur.split('_').map(Number);
-                    return { x: fx, y: fy };
+            if (targetKeys.has(nkey)) {
+                const path = [];
+                let cur = nkey;
+                while (cur) {
+                    const [px, py] = cur.split("_").map(Number);
+                    path.push({ x: px, y: py });
+                    cur = parent.get(cur);
                 }
-
-                queue.push({ x: nx, y: ny });
+                return path.reverse();
             }
+
+            queue.push({ x: nx, y: ny });
         }
     }
-    if (avoidEnemies) return findNextStep(sx, sy, tx, ty, false, avoidReserved);
-    if (avoidReserved) return findNextStep(sx, sy, tx, ty, false, false);
+    if (avoidEnemies) return findPathToClosestApproach(sx, sy, tx, ty, false, avoidReserved);
+    if (avoidReserved) return findPathToClosestApproach(sx, sy, tx, ty, false, false);
     return null;
 }
 
-function extractOwnerId(proprietaire) {
-    if (!proprietaire) return null;
-    if (typeof proprietaire === "string") return proprietaire;
-    return proprietaire.idEquipe || null;
+function canReachPlanetToAttack(shipX, shipY, planet) {
+    if (isAdjacent(shipX, shipY, planet.x, planet.y)) {
+        return true;
+    }
+
+    return Boolean(findPathToClosestApproach(shipX, shipY, planet.x, planet.y, false, false));
+}
+
+function markPlanetAsUnattackable(target) {
+    const cached = planetCache.get(target.key);
+    if (!cached) {
+        return;
+    }
+
+    cached.stuckCount = (cached.stuckCount || 0) + 1;
+    if (cached.stuckCount >= STUCK_THRESHOLD) {
+        cached.immune = true;
+        skippedPlanets.add(target.key);
+    }
+}
+
+function clearPlanetAttackFailures(target) {
+    const cached = planetCache.get(target.key);
+    if (!cached) {
+        return;
+    }
+
+    cached.stuckCount = 0;
+    cached.immune = false;
 }
 
 function log(name, msg) {
@@ -152,7 +209,7 @@ function updateCache(cells) {
 
     for (const cell of cells) {
         if (cell.vaisseau) {
-            const ownerId = extractOwnerId(cell.vaisseau.proprietaire);
+            const ownerId = normalizeTeamId(cell.vaisseau.proprietaire);
             if (ownerId && ownerId !== state.teamId) {
                 const ekey = `${cell.coord_x}_${cell.coord_y}`;
                 enemyCache.set(ekey, { x: cell.coord_x, y: cell.coord_y, teamId: ownerId, lastSeen: now });
@@ -167,7 +224,12 @@ function updateCache(cells) {
 
         const key = `${cell.coord_x}_${cell.coord_y}`;
         const hp = cell.planete.pointDeVie ?? 0;
-        const ownerId = extractOwnerId(cell.proprietaire);
+        const ownerId = getPlanetOwnerId(cell.planete, {
+            cell,
+            mapCells: cells,
+            teams: state.allTeams,
+            myTeam: state.myTeam
+        });
         const existing = planetCache.get(key);
         if (existing) {
             existing.hp = hp;
@@ -220,24 +282,11 @@ async function fullScan() {
 
 // ── Sélection de cible ────────────────────────────────────────
 function getBestTarget(shipX, shipY, myShipId) {
-    const myId = state.teamId;
-
-    // Positions de nos propres planètes (depuis l'état global, toujours à jour)
-    const myPlanets = (state.myTeam?.planetes ?? [])
-        .map(p => ({ x: p.coord_x ?? p.x, y: p.coord_y ?? p.y }))
-        .filter(p => p.x !== undefined);
-
-    // Clés de nos planètes pour exclusion fiable même si le cache est en retard
-    const myPlanetKeys = new Set(myPlanets.map(p => `${p.x}_${p.y}`));
-
     let best = null;
-    let bestScore = Infinity;
+    let bestDistance = Infinity;
 
     for (const [key, planet] of planetCache) {
         if (skippedPlanets.has(key)) continue;
-        // Exclure nos propres planètes (cache + état courant)
-        if (myPlanetKeys.has(key)) continue;
-        // Uniquement les planètes sans propriétaire
         if (planet.ownerId !== null && planet.ownerId !== undefined) continue;
         if (planet.x === shipX && planet.y === shipY) continue;
         if (planet.immune) continue;
@@ -248,16 +297,11 @@ function getBestTarget(shipX, shipY, myShipId) {
 
         const claimer = claimedTargets.get(key);
         if (claimer && claimer !== myShipId) continue;
+        if (!canReachPlanetToAttack(shipX, shipY, planet)) continue;
 
-        // Score = distance au vaisseau + distance minimale depuis une de nos planètes
-        const distShip = chebyshevDist(shipX, shipY, planet.x, planet.y);
-        const distTerritory = myPlanets.length > 0
-            ? Math.min(...myPlanets.map(p => chebyshevDist(p.x, p.y, planet.x, planet.y)))
-            : distShip;
-        const score = distShip + distTerritory;
-
-        if (score < bestScore) {
-            bestScore = score;
+        const distance = chebyshevDist(shipX, shipY, planet.x, planet.y);
+        if (distance < bestDistance) {
+            bestDistance = distance;
             best = { key, ...planet };
         }
     }
@@ -276,6 +320,124 @@ function abandonTarget(id, ss, skip = false) {
     ss.target = null;
     ss.phase = Phase.SEARCH;
     ss.hpBeforeAttack = null;
+}
+
+function shouldRunAutoAttack(shipId) {
+    return botActive && getRole(shipId) === Role.ATTACK;
+}
+
+async function getLatestShipById(shipId) {
+    const ships = await getShips(state.teamId);
+    return ships?.find((ship) => ship.idVaisseau === shipId) || null;
+}
+
+async function refreshPlanetTarget(target) {
+    await scanArea(target.x - 1, target.y - 1, target.x + 1, target.y + 1);
+    const cached = planetCache.get(target.key);
+    return cached ? { ...target, ...cached } : target;
+}
+
+async function runAutoAttackMission(ship) {
+    const shipId = ship.idVaisseau;
+    if (!shouldRunAutoAttack(shipId)) {
+        return;
+    }
+
+    await scanAroundShip(ship.positionX, ship.positionY);
+    let target = getBestTarget(ship.positionX, ship.positionY, shipId);
+    if (!target) {
+        await fullScan();
+        target = getBestTarget(ship.positionX, ship.positionY, shipId);
+    }
+    if (!target) {
+        log(ship.nom, "Aucune cible auto-attaque disponible.");
+        return;
+    }
+
+    claimedTargets.set(target.key, shipId);
+
+    try {
+        target = await refreshPlanetTarget(target);
+        if (target.ownerId === state.teamId) {
+            return;
+        }
+
+        const latestBeforeMove = await getLatestShipById(shipId);
+        if (!latestBeforeMove || !shouldRunAutoAttack(shipId)) {
+            return;
+        }
+
+        if (!isAdjacent(latestBeforeMove.positionX, latestBeforeMove.positionY, target.x, target.y)) {
+            const approachPath = findPathToClosestApproach(
+                latestBeforeMove.positionX,
+                latestBeforeMove.positionY,
+                target.x,
+                target.y
+            );
+            if (!approachPath || !approachPath.length) {
+                skippedPlanets.add(target.key);
+                log(ship.nom, `Aucun accès vers (${target.x},${target.y})`);
+                return;
+            }
+
+            const destination = approachPath[approachPath.length - 1];
+            log(ship.nom, `AUTO MOVE vers (${destination.x},${destination.y}) pour cible (${target.x},${target.y})`);
+            const moved = await runNavigationLoop(latestBeforeMove, destination.x, destination.y, { notifyUser: false });
+            if (!moved || !shouldRunAutoAttack(shipId)) {
+                return;
+            }
+        }
+
+        const latestBeforeAttack = await getLatestShipById(shipId);
+        if (!latestBeforeAttack || !shouldRunAutoAttack(shipId)) {
+            return;
+        }
+
+        target = await refreshPlanetTarget(target);
+        if (target.ownerId === state.teamId) {
+            return;
+        }
+        if (!canReachPlanetToAttack(latestBeforeAttack.positionX, latestBeforeAttack.positionY, target)) {
+            markPlanetAsUnattackable(target);
+            return;
+        }
+
+        if (target.hp > 0) {
+            const hpBeforeAttack = target.hp;
+            log(ship.nom, `AUTO ATTACK (${target.x},${target.y})`);
+            const destroyed = await runAttackLoop(latestBeforeAttack, target.x, target.y, { notifyUser: false });
+            if (!destroyed || !shouldRunAutoAttack(shipId)) {
+                target = await refreshPlanetTarget(target);
+                if ((target.hp ?? hpBeforeAttack) >= hpBeforeAttack) {
+                    markPlanetAsUnattackable(target);
+                }
+                return;
+            }
+            clearPlanetAttackFailures(target);
+        }
+
+        const latestBeforeConquer = await getLatestShipById(shipId);
+        if (!latestBeforeConquer || !shouldRunAutoAttack(shipId)) {
+            return;
+        }
+
+        target = await refreshPlanetTarget(target);
+        if (target.ownerId === state.teamId || target.hp > 0) {
+            return;
+        }
+        if (!isAdjacent(latestBeforeConquer.positionX, latestBeforeConquer.positionY, target.x, target.y)) {
+            return;
+        }
+
+        log(ship.nom, `AUTO CONQUERIR (${target.x},${target.y})`);
+        await doActionWithCooldown(state.teamId, shipId, "CONQUERIR", target.x, target.y);
+        target = await refreshPlanetTarget(target);
+        if (target.ownerId === state.teamId) {
+            notify(`[Bot] ${ship.nom} a conquis une planète !`, "success");
+        }
+    } finally {
+        releaseClaim(shipId, target.key);
+    }
 }
 
 // ── Tick par vaisseau ─────────────────────────────────────────
@@ -403,12 +565,13 @@ async function tickShip(ship) {
                 log(ship.nom, `Adjacent à cible, phase → ${ss.phase}`);
                 return;
             }
-            const step = findNextStep(sx, sy, ss.target.x, ss.target.y);
-            if (!step) {
+            const path = findPathToClosestApproach(sx, sy, ss.target.x, ss.target.y);
+            if (!path || path.length < 2) {
                 log(ship.nom, `Aucun chemin vers (${ss.target.x},${ss.target.y}), abandon`);
                 abandonTarget(id, ss, true);
                 return;
             }
+            const step = path[1];
 
             const stepKey = `${step.x}_${step.y}`;
             await scanArea(step.x, step.y, step.x, step.y);
@@ -422,10 +585,17 @@ async function tickShip(ship) {
 
             reservedCells.add(stepKey);
 
-            log(ship.nom, `MOVE : (${sx},${sy}) → (${step.x},${step.y}) [cible (${ss.target.x},${ss.target.y})]`);
+            const destination = path[path.length - 1];
+            log(ship.nom, `MOVE : (${sx},${sy}) → (${destination.x},${destination.y}) [approche cible (${ss.target.x},${ss.target.y})]`);
             try {
-                await doActionWithCooldown(state.teamId, id, "DEPLACEMENT", step.x, step.y);
-                log(ship.nom, `✓ Déplacement vers (${step.x},${step.y})`);
+                const moved = await runNavigationLoop(ship, destination.x, destination.y, { notifyUser: false });
+                if (!moved) {
+                    reservedCells.delete(stepKey);
+                    log(ship.nom, `✗ Déplacement auto interrompu vers (${destination.x},${destination.y})`);
+                    return;
+                }
+                log(ship.nom, `✓ Déplacement auto terminé vers (${destination.x},${destination.y})`);
+                ss.phase = ss.target.hp <= 0 ? Phase.CONQUER : Phase.ATTACK;
             } catch (e) {
                 reservedCells.delete(stepKey);
                 if (isCellOccupiedError(e.message)) {
@@ -446,34 +616,19 @@ async function tickShip(ship) {
                 return;
             }
 
-            const cached = planetCache.get(ss.target.key);
-            if (ss.hpBeforeAttack !== null && ss.target.hp >= ss.hpBeforeAttack) {
-                if (cached) cached.stuckCount = (cached.stuckCount || 0) + 1;
-                if ((cached?.stuckCount ?? 0) >= STUCK_THRESHOLD) {
-                    log(ship.nom, `Planète ${ss.target.key} immunisée, mise en cache.`);
-                    if (cached) cached.immune = true;
-                    abandonTarget(id, ss, true);
-                    return;
-                }
-            } else if (ss.hpBeforeAttack !== null && cached) {
-                cached.stuckCount = 0;
-            }
-
-            ss.hpBeforeAttack = ss.target.hp;
-            log(ship.nom, `⚔ Attaque (${ss.target.x},${ss.target.y}) HP=${ss.hpBeforeAttack}`);
+            log(ship.nom, `⚔ Attaque auto (${ss.target.x},${ss.target.y})`);
             try {
-                await doActionWithCooldown(state.teamId, id, "ATTAQUER", ss.target.x, ss.target.y);
+                const destroyed = await runAttackLoop(ship, ss.target.x, ss.target.y, { notifyUser: false });
                 ss.lastAttackTime = Date.now();
-                await sleep(500);
                 await scanArea(ss.target.x - 1, ss.target.y - 1, ss.target.x + 1, ss.target.y + 1);
                 const updated = planetCache.get(ss.target.key);
                 if (updated) {
                     ss.target.hp = updated.hp;
                     log(ship.nom, `HP après attaque : ${updated.hp}`);
-                    if (updated.hp <= 0) ss.phase = Phase.WAIT_CONQUER;
                 }
+                if (destroyed || (updated && updated.hp <= 0)) ss.phase = Phase.WAIT_CONQUER;
             } catch (e) {
-                log(ship.nom, `✗ Erreur attaque : ${e.message}`);
+                log(ship.nom, `✗ Erreur attaque auto : ${e.message}`);
             }
             break;
         }
@@ -540,8 +695,19 @@ async function botTick() {
         log("BOT", `${activeShips.length} vaisseau(x) en ATTACK`);
 
         for (const ship of activeShips) {
-            await tickShip(ship);
-            await sleep(500);
+            if (activeShipLoops.has(ship.idVaisseau)) {
+                continue;
+            }
+
+            activeShipLoops.add(ship.idVaisseau);
+            runAutoAttackMission(ship)
+                .catch((error) => {
+                    log(ship.nom, `Mission auto-attaque interrompue : ${error.message}`);
+                    console.error("[Bot] Mission auto-attaque :", error);
+                })
+                .finally(() => {
+                    activeShipLoops.delete(ship.idVaisseau);
+                });
         }
     } catch (e) {
         log("BOT", `Erreur tick : ${e.message}`);
@@ -558,6 +724,9 @@ export async function startBot() {
     notify("[Bot] Démarrage — scan initial...", "info");
     await fullScan();
     botInterval = setInterval(botTick, TICK_MS);
+    botTick().catch((error) => {
+        log("BOT", `Erreur tick initial : ${error.message}`);
+    });
     log("BOT", "Actif");
     notify("[Bot] Actif ✓", "info");
 }
@@ -569,6 +738,7 @@ export function stopBot() {
     tickRunning = false;
     claimedTargets.clear();
     shipState.clear();
+    activeShipLoops.clear();
     skippedPlanets.clear();
     reservedCells.clear();
     log("BOT", "Arrêté");

@@ -16,6 +16,8 @@ import { getPlanetOwnerId, normalizeTeamId } from "./ownership.js";
 import { camera, focusOnShip, focusOnWholeMap, initScene, panCameraTo, render, renderer } from "./scene.js";
 import { state } from "./state.js";
 import {
+  cancelAttack,
+  cancelNavigation,
   clearPendingAction,
   closeInfoPanel,
   drawMinimap,
@@ -194,22 +196,6 @@ function isOutOfRangeError(message) {
   );
 }
 
-function isShipUnavailableError(message) {
-  const normalizedMessage = `${message || ""}`.toLowerCase();
-  return (
-    normalizedMessage.includes("indisponible") ||
-    normalizedMessage.includes("non disponible") ||
-    normalizedMessage.includes("pas disponible") ||
-    normalizedMessage.includes("cooldown") ||
-    normalizedMessage.includes("prochaine action") ||
-    normalizedMessage.includes("next action")
-  );
-}
-
-function getMovementRetryDelay(ship, fallbackDelay = 1000) {
-  const readyDelay = getActionReadyDelay(ship);
-  return readyDelay > 0 ? readyDelay : fallbackDelay;
-}
 
 async function getCellsForPathfinding() {
   const expectedCellCount = state.mapWorldSize * state.mapWorldSize;
@@ -276,11 +262,7 @@ function findShortestPath(startX, startY, targetX, targetY, cells) {
     [1, 0],
     [-1, 0],
     [0, 1],
-    [0, -1],
-    [1, 1],
-    [1, -1],
-    [-1, 1],
-    [-1, -1]
+    [0, -1]
   ];
 
   while (queue.length > 0) {
@@ -357,7 +339,7 @@ function scheduleMovementPlanRetry(delayMs = 500) {
   }
 
   movementPlanTimer = setTimeout(() => {
-    processMovementPlan().catch((error) => {
+    processMovementPlanReset2().catch((error) => {
       console.error(error);
       clearMovementPlan(`Trajet interrompu : ${error.message}`, "error");
     });
@@ -416,8 +398,119 @@ async function planShipMovement(ship, targetX, targetY) {
     );
   }
 
-  await processMovementPlan();
+  await processMovementPlanReset2();
   return true;
+}
+
+async function processMovementPlanReset2() {
+  if (processingMovementPlan || !state.movementPlan) {
+    return;
+  }
+
+  processingMovementPlan = true;
+  clearTimeout(movementPlanTimer);
+  movementPlanTimer = null;
+
+  try {
+    const plan = state.movementPlan;
+    const ship = getCurrentShipById(plan.shipId) || state.selectedShip;
+
+    if (!ship || ship.idVaisseau !== plan.shipId) {
+      clearMovementPlan("Trajet annulé : vaisseau introuvable", "error");
+      return;
+    }
+
+    if (ship.positionX === plan.targetX && ship.positionY === plan.targetY) {
+      clearMovementPlan(`Trajet terminé pour ${ship.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    const readyDelay = getActionReadyDelay(ship);
+    if (readyDelay > 0) {
+      scheduleMovementPlanRetry(readyDelay);
+      return;
+    }
+
+    const cells = await getCellsForPathfinding();
+    const path = findShortestPath(
+      ship.positionX,
+      ship.positionY,
+      plan.targetX,
+      plan.targetY,
+      cells
+    );
+
+    if (!path) {
+      clearMovementPlan("Aucun chemin disponible jusqu'à cette case", "error");
+      return;
+    }
+
+    const preferredWaypointIndex = Math.min(path.length - 1, getShipMoveRange(ship));
+    const nextWaypoint = path[preferredWaypointIndex];
+    if (
+      !nextWaypoint ||
+      (nextWaypoint.coord_x === ship.positionX && nextWaypoint.coord_y === ship.positionY)
+    ) {
+      clearMovementPlan(`Trajet terminé pour ${ship.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    let response;
+    try {
+      response = await doAction(
+        state.teamId,
+        ship.idVaisseau,
+        "DEPLACEMENT",
+        nextWaypoint.coord_x,
+        nextWaypoint.coord_y
+      );
+    } catch (error) {
+      const fallbackWaypoint = path[1];
+      const shouldRetryWithNearestStep = isOutOfRangeError(error.message);
+
+      if (
+        shouldRetryWithNearestStep &&
+        preferredWaypointIndex > 1 &&
+        fallbackWaypoint &&
+        (
+          fallbackWaypoint.coord_x !== nextWaypoint.coord_x ||
+          fallbackWaypoint.coord_y !== nextWaypoint.coord_y
+        )
+      ) {
+        response = await doAction(
+          state.teamId,
+          ship.idVaisseau,
+          "DEPLACEMENT",
+          fallbackWaypoint.coord_x,
+          fallbackWaypoint.coord_y
+        );
+      } else {
+        throw error;
+      }
+    }
+
+    if (response?.message) {
+      notify(`DEPLACEMENT : ${response.message}`, "success");
+    }
+
+    await fullSync();
+
+    if (!state.movementPlan || state.movementPlan.shipId !== plan.shipId) {
+      return;
+    }
+
+    const refreshedShip = getCurrentShipById(plan.shipId) || ship;
+    if (refreshedShip.positionX === plan.targetX && refreshedShip.positionY === plan.targetY) {
+      clearMovementPlan(`Trajet terminé pour ${refreshedShip.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    scheduleMovementPlanRetry(getActionReadyDelay(refreshedShip) || 400);
+  } catch (error) {
+    clearMovementPlan(`Trajet interrompu : ${error.message}`, "error");
+  } finally {
+    processingMovementPlan = false;
+  }
 }
 
 async function processMovementPlanLegacy() {
@@ -686,7 +779,7 @@ async function refreshAllTeams() {
     if (state.movementPlan && !processingMovementPlan && !movementPlanTimer) {
       const plannedShip = getCurrentShipById(state.movementPlan.shipId);
       if (plannedShip) {
-        scheduleMovementPlanRetry(getMovementRetryDelay(plannedShip, 1000));
+        scheduleMovementPlanRetry(getActionReadyDelay(plannedShip) || 250);
       }
     }
   } catch (error) {
@@ -1141,13 +1234,10 @@ async function handlePrimaryMapClick(event, element, raycaster, mouse) {
 
   if (state.pendingAction) {
     if (clickedCell) {
-      if (state.pendingAction.action === "DEPLACEMENT") {
-        await planShipMovement(state.pendingAction.vaisseau, clickedCell.coord_x, clickedCell.coord_y);
-      } else {
-        const executed = await executePendingAction(clickedCell.coord_x, clickedCell.coord_y);
-        if (executed) {
-          await fullSync();
-        }
+      const pendingActionType = state.pendingAction.action;
+      const executed = await executePendingAction(clickedCell.coord_x, clickedCell.coord_y);
+      if (executed && pendingActionType !== "DEPLACEMENT") {
+        await fullSync();
       }
     }
     return;
@@ -1255,6 +1345,10 @@ function registerInput() {
     keys[event.key] = true;
 
     if (event.key === "Escape") {
+      if (state.selectedShip?.idVaisseau) {
+        cancelAttack(state.selectedShip.idVaisseau);
+        cancelNavigation(state.selectedShip.idVaisseau);
+      }
       if (state.movementPlan) {
         clearMovementPlan("Trajet annulé", "info");
       }
