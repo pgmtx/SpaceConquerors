@@ -287,7 +287,6 @@ export function showShipInfo(ship) {
     {
       icon: "🏃",
       label: "Déplacer",
-      disabled: !available,
       active: state.pendingAction?.action === "DEPLACEMENT",
       action: () => setPendingAction({ action: "DEPLACEMENT", vaisseau: ship })
     },

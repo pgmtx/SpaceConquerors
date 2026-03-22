@@ -364,11 +364,19 @@ async function planShipMovement(ship, targetX, targetY) {
     targetX,
     targetY
   };
+  const readyDelay = getActionReadyDelay(currentShip);
 
   notify(
     `Trajet défini vers (${targetX}, ${targetY}) · ${Math.max(0, path.length - 1)} cases`,
     "success"
   );
+
+  if (readyDelay > 0) {
+    notify(
+      `${currentShip.nom || "Le vaisseau"} est en cooldown : le trajet dÃ©marrera automatiquement dÃ¨s qu'il sera disponible`,
+      "info"
+    );
+  }
 
   await processMovementPlan();
   return true;
@@ -417,7 +425,8 @@ async function processMovementPlan() {
       return;
     }
 
-    const nextWaypoint = path[Math.min(path.length - 1, getShipMoveRange(ship))];
+    const preferredWaypointIndex = Math.min(path.length - 1, getShipMoveRange(ship));
+    const nextWaypoint = path[preferredWaypointIndex];
     if (
       !nextWaypoint ||
       (nextWaypoint.coord_x === ship.positionX && nextWaypoint.coord_y === ship.positionY)
@@ -426,13 +435,42 @@ async function processMovementPlan() {
       return;
     }
 
-    const response = await doAction(
-      state.teamId,
-      ship.idVaisseau,
-      "DEPLACEMENT",
-      nextWaypoint.coord_x,
-      nextWaypoint.coord_y
-    );
+    let response;
+    try {
+      response = await doAction(
+        state.teamId,
+        ship.idVaisseau,
+        "DEPLACEMENT",
+        nextWaypoint.coord_x,
+        nextWaypoint.coord_y
+      );
+    } catch (error) {
+      const message = `${error.message || ""}`.toLowerCase();
+      const fallbackWaypoint = path[1];
+      const shouldRetryWithNearestStep =
+        message.includes("hors de portée") ||
+        message.includes("hors de portee");
+
+      if (
+        shouldRetryWithNearestStep &&
+        preferredWaypointIndex > 1 &&
+        fallbackWaypoint &&
+        (
+          fallbackWaypoint.coord_x !== nextWaypoint.coord_x ||
+          fallbackWaypoint.coord_y !== nextWaypoint.coord_y
+        )
+      ) {
+        response = await doAction(
+          state.teamId,
+          ship.idVaisseau,
+          "DEPLACEMENT",
+          fallbackWaypoint.coord_x,
+          fallbackWaypoint.coord_y
+        );
+      } else {
+        throw error;
+      }
+    }
 
     if (response?.message) {
       notify(`DEPLACEMENT : ${response.message}`, "success");
@@ -1012,13 +1050,11 @@ function initializeMapView() {
     state.viewY = 0;
     state.viewSize = state.mapWorldSize;
     focusOnWholeMap();
-    updateMapModeButton();
     refreshMap();
     return;
   }
 
   centerViewOnFleet();
-  updateMapModeButton();
 }
 
 function startGameLoop() {
@@ -1052,7 +1088,6 @@ function scheduleAutoSync() {
 }
 
 function registerButtons() {
-  const mapModeButton = document.getElementById("map-mode-btn");
   const refreshButton = document.getElementById("refresh-btn");
 
   refreshButton.addEventListener("click", async () => {
@@ -1061,23 +1096,6 @@ function registerButtons() {
     await fullSync();
     refreshButton.textContent = "Sync";
     refreshButton.disabled = false;
-  });
-
-  mapModeButton.addEventListener("click", async () => {
-    state.fullMapMode = !state.fullMapMode;
-
-    if (state.fullMapMode) {
-      state.viewX = 0;
-      state.viewY = 0;
-      state.viewSize = state.mapWorldSize;
-      focusOnWholeMap();
-    } else {
-      state.viewSize = 18;
-      centerViewOnFleet();
-    }
-
-    updateMapModeButton();
-    await refreshMap();
   });
 
   document.getElementById("lb-toggle").addEventListener("click", () => {
@@ -1106,15 +1124,6 @@ function registerButtons() {
   document.getElementById("rename-cancel").addEventListener("click", () => {
     document.getElementById("rename-modal").classList.add("hidden");
   });
-}
-
-function updateMapModeButton() {
-  const button = document.getElementById("map-mode-btn");
-  if (!button) {
-    return;
-  }
-
-  button.textContent = state.fullMapMode ? "Vue Secteur" : "Carte Totale";
 }
 
 function registerInput() {
