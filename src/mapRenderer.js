@@ -40,6 +40,95 @@ let selectedShipId = null;
 let selectedPlanetId = null;
 let selectedCellKey = null;
 
+function disposeMaterial(material) {
+  if (!material) {
+    return;
+  }
+
+  if (Array.isArray(material)) {
+    material.forEach(disposeMaterial);
+    return;
+  }
+
+  material.dispose?.();
+}
+
+function disposeObjectResources(object) {
+  if (!object) {
+    return;
+  }
+
+  object.traverse((child) => {
+    if (child.geometry && !child.userData?.sharedGeometry) {
+      child.geometry.dispose();
+    }
+
+    if (child.material) {
+      disposeMaterial(child.material);
+    }
+  });
+}
+
+function removeAndDispose(parent, object) {
+  if (!object) {
+    return;
+  }
+
+  parent?.remove(object);
+  disposeObjectResources(object);
+}
+
+function buildPlanetPayload(cell) {
+  if (!cell.planete || cell.planete.modelePlanete?.typePlanete === "VIDE") {
+    return null;
+  }
+
+  const planet = {
+    ...cell.planete,
+    identifiant: cell.planete.identifiant,
+    coord_x: cell.coord_x,
+    coord_y: cell.coord_y,
+    proprietaire: cell.proprietaire
+  };
+  const ownerId = getPlanetOwnerId(planet, {
+    cell,
+    mapCells: state.mapCells,
+    teams: state.allTeams,
+    myTeam: state.myTeam,
+    selectedCell: state.selectedCell
+  });
+  const modulesSignature = (planet.modules || [])
+    .slice(0, 6)
+    .map((module) => module?.id || module?.paramModule?.id || module?.paramModule?.typeModule || "module")
+    .sort()
+    .join("|");
+
+  return {
+    planet,
+    ownerId,
+    signature: [
+      planet.identifiant || `${cell.coord_x}_${cell.coord_y}`,
+      planet.modelePlanete?.typePlanete || "",
+      planet.modelePlanete?.biome || "",
+      ownerId || "none",
+      modulesSignature
+    ].join(":")
+  };
+}
+
+function syncPlanetUserData(planetContainer, planet) {
+  if (!planetContainer || !planet) {
+    return;
+  }
+
+  planetContainer.userData.planete = planet;
+  planetContainer.traverse((child) => {
+    if (child.userData?.isPlanet || child.userData?.isPlanetHitArea) {
+      child.userData.planete = planet;
+    }
+  });
+}
+
 function blendHex(baseHex, targetHex, factor) {
   const base = new THREE.Color(baseHex);
   const target = new THREE.Color(targetHex);
@@ -65,10 +154,12 @@ export function getTeamColor(teamId) {
 }
 
 export function clearMap() {
-  cellObjects.forEach(({ group }) => scene.remove(group));
-  shipObjects.forEach((mesh) => scene.remove(mesh));
+  cellObjects.forEach(({ group }) => removeAndDispose(scene, group));
+  shipObjects.forEach((mesh) => removeAndDispose(scene, mesh));
   cellObjects.clear();
   shipObjects.clear();
+  selectedShipId = null;
+  selectedPlanetId = null;
   selectedCellKey = null;
 }
 
@@ -104,14 +195,14 @@ export async function renderMap(cells) {
 
   cellObjects.forEach((entry, key) => {
     if (!visibleKeys.has(key)) {
-      scene.remove(entry.group);
+      removeAndDispose(scene, entry.group);
       cellObjects.delete(key);
     }
   });
 
   shipObjects.forEach((mesh, shipId) => {
     if (!visibleShipIds.has(shipId)) {
-      scene.remove(mesh);
+      removeAndDispose(scene, mesh);
       shipObjects.delete(shipId);
     }
   });
@@ -152,33 +243,39 @@ function updateCellTile(group, cell) {
   const color = ownerId ? getTeamColor(ownerId) : 0x0a1528;
   tile.material.color.setHex(color);
   tile.material.opacity = ownerId ? 0.34 : 0.18;
-  tile.material.emissive = new THREE.Color(ownerId ? color : 0x000000);
+  tile.material.emissive.setHex(ownerId ? color : 0x000000);
   tile.material.emissiveIntensity = ownerId ? 0.1 : 0;
 }
 
 async function syncPlanet(group, cell) {
   const previous = group.children.find((child) => child.userData.isPlanetContainer);
-  if (previous) {
-    group.remove(previous);
-  }
+  const payload = buildPlanetPayload(cell);
 
-  if (!cell.planete || cell.planete.modelePlanete?.typePlanete === "VIDE") {
+  if (!payload) {
+    if (previous) {
+      removeAndDispose(group, previous);
+    }
     return;
   }
 
-  const planetGroup = await buildPlanet(cell);
+  if (previous?.userData.renderSignature === payload.signature) {
+    syncPlanetUserData(previous, payload.planet);
+    return;
+  }
+
+  if (previous) {
+    removeAndDispose(group, previous);
+  }
+
+  const planetGroup = await buildPlanet(cell, payload);
+  planetGroup.userData.renderSignature = payload.signature;
+  syncPlanetUserData(planetGroup, payload.planet);
   group.add(planetGroup);
 }
 
-async function buildPlanet(cell) {
-  const planet = {
-    ...cell.planete,
-    identifiant: cell.planete.identifiant,
-    coord_x: cell.coord_x,
-    coord_y: cell.coord_y,
-    proprietaire: cell.proprietaire
-  };
-
+async function buildPlanet(cell, payload = buildPlanetPayload(cell)) {
+  const planet = payload?.planet;
+  const ownerId = payload?.ownerId;
   const group = new THREE.Group();
   group.userData.isPlanetContainer = true;
 
@@ -187,13 +284,6 @@ async function buildPlanet(cell) {
   const override = TYPE_OVERRIDES[type];
   const palette = override || BIOME_COLORS[biome] || { color: 0x6c7b8d, emissive: 0x13202f };
   const radius = override?.radius || (type === "GAZEUSE" ? 0.62 : 0.48);
-  const ownerId = getPlanetOwnerId(planet, {
-    cell,
-    mapCells: state.mapCells,
-    teams: state.allTeams,
-    myTeam: state.myTeam,
-    selectedCell: state.selectedCell
-  });
   const ownerColor = ownerId ? getTeamColor(ownerId) : null;
   const surfaceColor = ownerColor ? blendHex(palette.color, ownerColor, 0.82) : palette.color;
   const emissiveColor = ownerColor ? blendHex(palette.emissive, ownerColor, 0.4) : palette.emissive;
@@ -507,7 +597,7 @@ function addSelectionRing(mesh) {
 function removeSelectionRing(mesh) {
   const ring = mesh.children.find((child) => child.userData.isSelectionRing);
   if (ring) {
-    mesh.remove(ring);
+    removeAndDispose(mesh, ring);
   }
 }
 
@@ -551,7 +641,7 @@ function addPlanetSelectionRing(planetContainer) {
 function removePlanetSelectionRing(planetContainer) {
   const ring = planetContainer.children.find((child) => child.userData.isPlanetSelectionRing);
   if (ring) {
-    planetContainer.remove(ring);
+    removeAndDispose(planetContainer, ring);
   }
 }
 
@@ -576,6 +666,6 @@ function addCellSelectionMarker(group) {
 function removeCellSelectionMarker(group) {
   const marker = group.children.find((child) => child.userData.isCellSelectionMarker);
   if (marker) {
-    group.remove(marker);
+    removeAndDispose(group, marker);
   }
 }

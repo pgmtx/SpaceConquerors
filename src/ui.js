@@ -130,6 +130,9 @@ function getOwnershipDetails(ownerId) {
 
 export function notify(message, type = "info") {
   const container = document.getElementById("notifications");
+  while (container.childElementCount >= 6) {
+    container.firstElementChild?.remove();
+  }
   const element = document.createElement("div");
   element.className = `notif${type === "info" ? "" : ` ${type}`}`;
   element.textContent = message;

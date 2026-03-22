@@ -59,6 +59,9 @@ function normalizeModel(model, maxSize, withShadows = true) {
     if (child.isMesh) {
       child.castShadow = withShadows;
       child.receiveShadow = false;
+      // GLTF clones share geometry references; keep that metadata so render cleanup
+      // can dispose only per-instance materials without breaking the cached models.
+      child.userData.sharedGeometry = Boolean(child.geometry);
       if (child.material) {
         child.material = child.material.clone();
       }

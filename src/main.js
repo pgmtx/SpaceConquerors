@@ -41,6 +41,10 @@ const keys = {};
 const moveAccumulator = { x: 0, y: 0 };
 let movementPlanTimer = null;
 let processingMovementPlan = false;
+let refreshMapPromise = null;
+let refreshMapQueued = false;
+let fullSyncPromise = null;
+let fullSyncQueued = false;
 
 async function main() {
   setLoading(5, "Récupération du token de jeu...");
@@ -91,34 +95,68 @@ async function main() {
 }
 
 async function fullSync() {
-  await Promise.allSettled([refreshMap(), refreshAllTeams()]);
+  if (fullSyncPromise) {
+    fullSyncQueued = true;
+    return fullSyncPromise;
+  }
+
+  fullSyncPromise = Promise.allSettled([refreshMap(), refreshAllTeams()]);
+
+  try {
+    await fullSyncPromise;
+  } finally {
+    fullSyncPromise = null;
+
+    if (fullSyncQueued) {
+      fullSyncQueued = false;
+      void fullSync();
+    }
+  }
 }
 
 async function refreshMap() {
-  try {
-    const cells = state.fullMapMode
-      ? await fetchWholeMap()
-      : await getMap(
-          state.viewX,
-          state.viewX + state.viewSize - 1,
-          state.viewY,
-          state.viewY + state.viewSize - 1
-        );
+  if (refreshMapPromise) {
+    refreshMapQueued = true;
+    return refreshMapPromise;
+  }
 
-    state.mapCells = cells || [];
-    updateMinimapData(state.mapCells);
-    await renderMap(state.mapCells);
-    const selection = getSelectionFromState();
-    if (selection) {
-      applySelection(selection);
+  refreshMapPromise = (async () => {
+    try {
+      const cells = state.fullMapMode
+        ? await fetchWholeMap()
+        : await getMap(
+            state.viewX,
+            state.viewX + state.viewSize - 1,
+            state.viewY,
+            state.viewY + state.viewSize - 1
+          );
+
+      state.mapCells = cells || [];
+      updateMinimapData(state.mapCells);
+      await renderMap(state.mapCells);
+      const selection = getSelectionFromState();
+      if (selection) {
+        applySelection(selection);
+      }
+      updateCoords(
+        state.fullMapMode ? "GLOBAL" : state.viewX,
+        state.fullMapMode ? "58x58" : state.viewY
+      );
+      drawMinimap(state.mapCells);
+    } catch (error) {
+      notify(`Erreur carte: ${error.message}`, "error");
     }
-    updateCoords(
-      state.fullMapMode ? "GLOBAL" : state.viewX,
-      state.fullMapMode ? "58x58" : state.viewY
-    );
-    drawMinimap(state.mapCells);
-  } catch (error) {
-    notify(`Erreur carte: ${error.message}`, "error");
+  })();
+
+  try {
+    await refreshMapPromise;
+  } finally {
+    refreshMapPromise = null;
+
+    if (refreshMapQueued) {
+      refreshMapQueued = false;
+      void refreshMap();
+    }
   }
 }
 
