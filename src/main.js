@@ -158,6 +158,15 @@ function getCurrentShipById(shipId) {
   return state.myTeam?.vaisseaux?.find((ship) => ship.idVaisseau === shipId) || null;
 }
 
+function isShipAlive(ship) {
+  const hp = Number(ship?.pointDeVie);
+  return !Number.isFinite(hp) || hp > 0;
+}
+
+function getSelectableShips() {
+  return (state.myTeam?.vaisseaux || []).filter(isShipAlive);
+}
+
 function getShipMoveRange(ship) {
   const rawSpeed = ship?.type?.vitesse ?? ship?.vitesse ?? 1;
   const numericSpeed = Number.parseInt(rawSpeed, 10);
@@ -175,6 +184,31 @@ function getActionReadyDelay(ship) {
   }
 
   return Math.max(0, nextDate.getTime() - Date.now() + 250);
+}
+
+function isOutOfRangeError(message) {
+  const normalizedMessage = `${message || ""}`.toLowerCase();
+  return (
+    normalizedMessage.includes("hors de portée") ||
+    normalizedMessage.includes("hors de portee")
+  );
+}
+
+function isShipUnavailableError(message) {
+  const normalizedMessage = `${message || ""}`.toLowerCase();
+  return (
+    normalizedMessage.includes("indisponible") ||
+    normalizedMessage.includes("non disponible") ||
+    normalizedMessage.includes("pas disponible") ||
+    normalizedMessage.includes("cooldown") ||
+    normalizedMessage.includes("prochaine action") ||
+    normalizedMessage.includes("next action")
+  );
+}
+
+function getMovementRetryDelay(ship, fallbackDelay = 1000) {
+  const readyDelay = getActionReadyDelay(ship);
+  return readyDelay > 0 ? readyDelay : fallbackDelay;
 }
 
 async function getCellsForPathfinding() {
@@ -242,7 +276,11 @@ function findShortestPath(startX, startY, targetX, targetY, cells) {
     [1, 0],
     [-1, 0],
     [0, 1],
-    [0, -1]
+    [0, -1],
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+    [-1, -1]
   ];
 
   while (queue.length > 0) {
@@ -382,7 +420,7 @@ async function planShipMovement(ship, targetX, targetY) {
   return true;
 }
 
-async function processMovementPlan() {
+async function processMovementPlanLegacy() {
   if (processingMovementPlan || !state.movementPlan) {
     return;
   }
@@ -425,8 +463,7 @@ async function processMovementPlan() {
       return;
     }
 
-    const preferredWaypointIndex = Math.min(path.length - 1, getShipMoveRange(ship));
-    const nextWaypoint = path[preferredWaypointIndex];
+    const nextWaypoint = path[1];
     if (
       !nextWaypoint ||
       (nextWaypoint.coord_x === ship.positionX && nextWaypoint.coord_y === ship.positionY)
@@ -435,9 +472,8 @@ async function processMovementPlan() {
       return;
     }
 
-    let response;
     try {
-      response = await doAction(
+      await doAction(
         state.teamId,
         ship.idVaisseau,
         "DEPLACEMENT",
@@ -445,9 +481,15 @@ async function processMovementPlan() {
         nextWaypoint.coord_y
       );
     } catch (error) {
-      const message = `${error.message || ""}`.toLowerCase();
-      const fallbackWaypoint = path[1];
-      const shouldRetryWithNearestStep =
+      if (isOutOfRangeError(error.message)) {
+        await fullSync();
+        const refreshedShip = getCurrentShipById(plan.shipId) || ship;
+        scheduleMovementPlanRetry(getMovementRetryDelay(refreshedShip, 800));
+        return;
+      }
+
+      throw error;
+
         message.includes("hors de portée") ||
         message.includes("hors de portee");
 
@@ -472,9 +514,6 @@ async function processMovementPlan() {
       }
     }
 
-    if (response?.message) {
-      notify(`DEPLACEMENT : ${response.message}`, "success");
-    }
 
     await fullSync();
 
@@ -488,8 +527,99 @@ async function processMovementPlan() {
       return;
     }
 
-    scheduleMovementPlanRetry(getActionReadyDelay(refreshedShip) || 400);
+    scheduleMovementPlanRetry(getMovementRetryDelay(refreshedShip, 800));
   } catch (error) {
+    if (isOutOfRangeError(error.message)) {
+      await fullSync();
+      const plannedShip = getCurrentShipById(state.movementPlan?.shipId) || state.selectedShip;
+      scheduleMovementPlanRetry(getMovementRetryDelay(plannedShip, 800));
+      return;
+    }
+
+    clearMovementPlan(`Trajet interrompu : ${error.message}`, "error");
+  } finally {
+    processingMovementPlan = false;
+  }
+}
+
+async function processMovementPlan() {
+  if (processingMovementPlan || !state.movementPlan) {
+    return;
+  }
+
+  processingMovementPlan = true;
+  clearTimeout(movementPlanTimer);
+  movementPlanTimer = null;
+
+  try {
+    const plan = state.movementPlan;
+    const ship = getCurrentShipById(plan.shipId) || state.selectedShip;
+
+    if (!ship || ship.idVaisseau !== plan.shipId) {
+      clearMovementPlan("Trajet annule : vaisseau introuvable", "error");
+      return;
+    }
+
+    if (ship.positionX === plan.targetX && ship.positionY === plan.targetY) {
+      clearMovementPlan(`Trajet termine pour ${ship.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    const readyDelay = getActionReadyDelay(ship);
+    if (readyDelay > 0) {
+      scheduleMovementPlanRetry(getMovementRetryDelay(ship, readyDelay));
+      return;
+    }
+
+    const cells = await getCellsForPathfinding();
+    const path = findShortestPath(
+      ship.positionX,
+      ship.positionY,
+      plan.targetX,
+      plan.targetY,
+      cells
+    );
+
+    if (!path || path.length < 2) {
+      clearMovementPlan("Aucun chemin disponible jusqu'a cette case", "error");
+      return;
+    }
+
+    const nextWaypoint = path[1];
+    await doAction(
+      state.teamId,
+      ship.idVaisseau,
+      "DEPLACEMENT",
+      nextWaypoint.coord_x,
+      nextWaypoint.coord_y
+    );
+
+    await fullSync();
+
+    if (!state.movementPlan || state.movementPlan.shipId !== plan.shipId) {
+      return;
+    }
+
+    const refreshedShip = getCurrentShipById(plan.shipId) || ship;
+    if (!refreshedShip || refreshedShip.idVaisseau !== plan.shipId) {
+      clearMovementPlan("Trajet annule : vaisseau introuvable", "error");
+      return;
+    }
+
+    if (refreshedShip.positionX === plan.targetX && refreshedShip.positionY === plan.targetY) {
+      clearMovementPlan(`Trajet termine pour ${refreshedShip.nom || "le vaisseau"}`, "success");
+      return;
+    }
+
+    scheduleMovementPlanRetry(getMovementRetryDelay(refreshedShip, 1000));
+  } catch (error) {
+    if (isOutOfRangeError(error.message) || isShipUnavailableError(error.message)) {
+      await fullSync();
+      const plannedShip = getCurrentShipById(state.movementPlan?.shipId) || state.selectedShip;
+      scheduleMovementPlanRetry(getMovementRetryDelay(plannedShip, 1000));
+      return;
+    }
+
     clearMovementPlan(`Trajet interrompu : ${error.message}`, "error");
   } finally {
     processingMovementPlan = false;
@@ -556,7 +686,7 @@ async function refreshAllTeams() {
     if (state.movementPlan && !processingMovementPlan && !movementPlanTimer) {
       const plannedShip = getCurrentShipById(state.movementPlan.shipId);
       if (plannedShip) {
-        scheduleMovementPlanRetry(getActionReadyDelay(plannedShip) || 250);
+        scheduleMovementPlanRetry(getMovementRetryDelay(plannedShip, 1000));
       }
     }
   } catch (error) {
@@ -1027,7 +1157,7 @@ async function handlePrimaryMapClick(event, element, raycaster, mouse) {
 }
 
 function centerViewOnFleet() {
-  const firstShip = state.myTeam?.vaisseaux?.[0];
+  const firstShip = getSelectableShips()[0];
   if (!firstShip || firstShip.positionX === undefined || firstShip.positionY === undefined) {
     return;
   }
@@ -1216,9 +1346,9 @@ function registerInput() {
 }
 
 function selectShipByIndex(index) {
-  const ships = state.myTeam?.vaisseaux || [];
+  const ships = getSelectableShips();
   if (!ships.length) {
-    notify("Aucun vaisseau disponible", "error");
+    notify("Aucun vaisseau vivant disponible", "error");
     return;
   }
 
